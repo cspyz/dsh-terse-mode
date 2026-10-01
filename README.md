@@ -16,7 +16,18 @@
 
 ## 快速开始
 
+从仓库直接装（pnpm/dsh 的 git 依赖）：
+
 ```bash
+dsh plugin --profile web add github:cspyz/dsh-terse-mode     # 网页端
+dsh plugin --profile desktop add github:cspyz/dsh-terse-mode # 桌面端
+```
+
+或者克隆下来，用仓库自带的一键脚本（会写好 link 依赖、junction 和 profile patch 那一行）：
+
+```bash
+git clone https://github.com/cspyz/dsh-terse-mode.git
+cd dsh-terse-mode
 node tools/install-terse-mode.mjs                   # 桌面端（profiles/desktop）
 node tools/install-terse-mode.mjs --profile web     # 网页端（dsh web 用的 profiles/web）
 ```

@@ -1,10 +1,18 @@
 {
   "name": "dsh-terse-mode",
   "version": "1.2.0",
-  "private": true,
   "description": "Keep the agent terse: four adjustable levels plus independent switches for reasoning effort, web search and subagents, on the conversation header and in Settings. No output ceiling.",
   "type": "module",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cspyz/dsh-terse-mode.git"
+  },
+  "homepage": "https://github.com/cspyz/dsh-terse-mode#readme",
+  "bugs": {
+    "url": "https://github.com/cspyz/dsh-terse-mode/issues"
+  },
+  "author": "cspyz",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -43,10 +51,12 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "plugin",
     "terse",
     "reasoning-effort",
-    "web-search"
+    "web-search",
+    "subagents"
   ],
   "license": "MIT"
 }
