@@ -1,0 +1,7 @@
+# Keep every text file LF in the repository, whatever the checkout platform.
+* text=auto eol=lf
+
+# Binary-ish assets
+*.zip binary
+*.png binary
+*.ico binary

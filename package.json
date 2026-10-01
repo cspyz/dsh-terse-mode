@@ -1,0 +1,52 @@
+{
+  "name": "dsh-terse-mode",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Keep the agent terse: four adjustable levels plus independent switches for reasoning effort, web search and subagents, on the conversation header and in Settings. No output ceiling.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "简洁模式 (dsh-terse-mode)",
+    "description": "让 DeepSeek 少想、少搜、少废话、少委派：四档强度常驻在对话页顶部，思考强度 / 联网搜索 / 子代理三个开关独立可调，设置页里也有一份。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "terse",
+    "reasoning-effort",
+    "web-search"
+  ],
+  "license": "MIT"
+}

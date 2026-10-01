@@ -1,0 +1,20 @@
+# Local installs and machine state — never commit these.
+node_modules/
+.backup/
+dist/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.local
+
+# Secrets and per-machine config (this plugin takes no credentials, but a
+# checkout may still hold a profile patch or an env file next to it).
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+cordis.patch.local.yml

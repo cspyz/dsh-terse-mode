@@ -1,0 +1,23 @@
+# dsh-terse-mode bundle patch — one host row, inserted into whatever profile
+# lists this bundle in `dsh.profile.bundles`.
+#
+# The four levels are: off | light | standard | strong. No level caps the output
+# length; length is steered by the prompt instruction only.
+# Everything below `level` overrides the level's own default:
+#   reasoningEffort: auto | none | off | low | high | max
+#     `auto`    follows the level (and the level's effort is a ceiling: never raised)
+#     an id here is a decision: the request gets exactly that effort (when the model
+#     advertises it), so it may be higher than the level's own value.
+#   maxTokens:       0 (follow the level) | -1 (unlimited) | positive number
+#   search:          auto | allow | deny
+#   instruction:     auto | none | <your own text>
+#   applyToAllModels: false | true   (default false = DeepSeek routes only)
+#
+# The user's own `cordis.patch.yml` can override this row by id and wins, so the
+# level survives package upgrades.
+- insert:
+    - id: terse-mode
+      name: dsh-terse-mode
+      config:
+        level: standard
+        maxTokens: -1

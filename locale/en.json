@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Terse mode (dsh-terse-mode)",
+    "description": "Keep the agent terse: four levels (off/light/standard/strong) plus independent switches for reasoning effort, web search and subagents. No output ceiling."
+  }
+}
