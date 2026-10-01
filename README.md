@@ -42,8 +42,12 @@ dsh plugin --profile desktop add github:cspyz/dsh-terse-mode    # 桌面端
 装完**重启一次 DSH**（或重启 `dsh web`），对话页顶部就会出现控件。
 
 - 桌面端和网页端是**两个独立 profile**，两边都想用就各装一次。
-- 如果你另外装了第三方插件市场，也可以直接在市场里搜索 `dsh-terse-mode` 安装。
-- 也可以克隆仓库后用自带脚本安装（可选，效果相同）：
+- 装完即用，不需要在设置里额外启用什么。
+
+**其他安装方式（可选）**
+
+- 如果你另外装了第三方插件市场，也可以直接在市场里搜 `dsh-terse-mode` 安装。
+- 也可以克隆仓库后用自带脚本安装，效果相同：
 
   ```bash
   git clone https://github.com/cspyz/dsh-terse-mode.git
@@ -58,7 +62,7 @@ dsh plugin --profile desktop add github:cspyz/dsh-terse-mode    # 桌面端
 
 ### 顶部控件
 
-在对话页顶部那一行（和「智能体团队 / 标准模式 / 费用明细」并排）：
+插件会在**对话页顶部那一行**放一个常驻控件：
 
 - 点 **关 / 轻 / 标准 / 强** 切换档位，立即生效；
 - 点 **子代理**、**联网** 单独开关（禁用时显示红字提醒）；
