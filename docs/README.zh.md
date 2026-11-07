@@ -1,4 +1,4 @@
-[English](README.md) | 中文
+[English](../README.md) | 中文
 
 # dsh-terse-mode — 少想、少搜、少废话
 
@@ -8,7 +8,7 @@
 
 **它不是「回答更短」那一类。** 同类插件多在比谁压得更狠，这里的取舍是**可控**：四档给你一个总开关，三个开关让你单独拧某一项，而**四个档位都不设输出上限**——长度只由「直接答、别复述」这条指令引导，不会被硬截断。
 
-<img src="assets/screenshots/01-header-row.png" width="880" alt="简洁模式控件在对话页顶部：紧邻「智能体团队 / 标准模式 / 费用明细」，右侧是四档（关 / 轻 / 标准 / 强）、子代理、联网搜索与 ?">
+<img src="../assets/screenshots/01-header-row.png" width="880" alt="简洁模式控件在对话页顶部：紧邻「智能体团队 / 标准模式 / 费用明细」，右侧是四档（关 / 轻 / 标准 / 强）、子代理、联网搜索与 ?">
 
 ## 安装
 
@@ -262,4 +262,4 @@ node --test test/plugin.test.mjs    # apply() 的接线（用一个假 Cordis co
 
 CI（`.github/workflows/test.yml`）在 Node 20 / 22 / 24 上各跑一遍，推 main 和提 PR 都触发。
 
-设计说明与取舍见 [`docs/design.md`](docs/design.md)。
+设计说明与取舍见 [`design.md`](design.md)。

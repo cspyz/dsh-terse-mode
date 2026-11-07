@@ -1,6 +1,6 @@
 {
   "name": "dsh-terse-mode",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Keep the agent terse: four adjustable levels plus independent switches for reasoning effort, web search and subagents, on the conversation header and in Settings. No output ceiling.",
   "type": "module",
   "main": "index.js",
