@@ -1,0 +1,35 @@
+# The suite uses node:test and node:assert only — no dependencies, no lockfile,
+# nothing to install. So this is checkout → pick a Node version → run it.
+#
+# The matrix spans what `engines` claims (>=20) through current, because a floor
+# break is the one thing a single-version run cannot see.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run the suite
+        run: npm test

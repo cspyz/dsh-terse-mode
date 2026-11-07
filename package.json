@@ -4,6 +4,9 @@
   "description": "Keep the agent terse: four adjustable levels plus independent switches for reasoning effort, web search and subagents, on the conversation header and in Settings. No output ceiling.",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cspyz/dsh-terse-mode.git"

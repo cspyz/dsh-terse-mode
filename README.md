@@ -1,5 +1,7 @@
 # dsh-terse-mode — 少想、少搜、少废话
 
+[![test](https://github.com/cspyz/dsh-terse-mode/actions/workflows/test.yml/badge.svg)](https://github.com/cspyz/dsh-terse-mode/actions/workflows/test.yml)
+
 一个 DSH（DeepSeek Harness）插件：四档强度常驻对话页顶部，思考强度 / 联网搜索 / 子代理三个开关各自独立可调，改完立即生效。
 
 **它不是「回答更短」那一类。** 同类插件多在比谁压得更狠，这里的取舍是**可控**：四档给你一个总开关，三个开关让你单独拧某一项，而**四个档位都不设输出上限**——长度只由「直接答、别复述」这条指令引导，不会被硬截断。
@@ -243,9 +245,11 @@ node tools/install-terse-mode.mjs --uninstall
 ## 开发
 
 ```sh
-node --test test/*.test.mjs         # 全部用例
+npm test                            # 全部用例（95 项，只用 node:test，无依赖）
 node --test test/logic.test.mjs     # 档位与钳制规则
 node --test test/plugin.test.mjs    # apply() 的接线（用一个假 Cordis context）
 ```
+
+CI（`.github/workflows/test.yml`）在 Node 20 / 22 / 24 上各跑一遍，推 main 和提 PR 都触发。
 
 设计说明与取舍见 [`docs/design.md`](docs/design.md)。
