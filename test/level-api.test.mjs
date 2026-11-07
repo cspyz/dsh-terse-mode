@@ -4,9 +4,9 @@
  * conversation-header widget actually takes.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { after, beforeEach, describe, it } from 'node:test'
 
@@ -15,9 +15,10 @@ import { createLevelStore } from '../lib/store.js'
 import { apply, Config } from '../index.js'
 
 /** Minimal node:http request/response doubles. */
-function request(method, body) {
+function request(method, body, headers) {
   const stream = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
   stream.method = method
+  stream.headers = headers ?? {}
   return stream
 }
 
@@ -33,7 +34,7 @@ function response() {
 }
 
 /** A controller stub: the handler's contract is what these tests pin down. */
-function stub({ level = 'standard', reasoningEffort = 'low', authored = {} } = {}) {
+function stub({ level = 'standard', reasoningEffort = 'low', authored = {}, instruction = 'x' } = {}) {
   const policy = () => ({
     level,
     authored,
@@ -41,7 +42,7 @@ function stub({ level = 'standard', reasoningEffort = 'low', authored = {} } = {
     reasoningMode: authored.reasoningEffort === undefined ? 'cap' : 'exact',
     maxTokens: null,
     search: 'deny',
-    instruction: 'x',
+    instruction,
   })
   return {
     calls: [],
@@ -124,6 +125,78 @@ describe('the panel API', () => {
     assert.deepEqual(controller.calls, [])
   })
 
+  it('refuses cross-site and rebinding writes before touching the controller', async () => {
+    const controller = stub()
+    const handler = createLevelHandler(controller)
+
+    // A local page: loopback Host, foreign Origin.
+    const cross = response()
+    await handler(request('POST', { level: 'off' }, {
+      host: '127.0.0.1:19387',
+      origin: 'http://evil.example',
+      'sec-fetch-site': 'cross-site',
+    }), cross)
+    assert.equal(cross.status, 403)
+    assert.match(cross.json().error, /untrusted origin/)
+
+    // DNS rebinding: the socket is loopback, the Host header is not.
+    const rebind = response()
+    await handler(request('POST', { level: 'off' }, {
+      host: 'evil.example:19387',
+      origin: 'http://evil.example:19387',
+    }), rebind)
+    assert.equal(rebind.status, 403)
+
+    // A form / `no-cors` fetch cannot claim JSON even when it reaches the route.
+    const formish = response()
+    await handler(request('POST', { level: 'off' }, {
+      host: '127.0.0.1:19387',
+      origin: 'http://127.0.0.1:19387',
+      'content-type': 'text/plain',
+    }), formish)
+    assert.equal(formish.status, 415)
+
+    assert.deepEqual(controller.calls, [], 'nothing may be applied')
+
+    // The real panel shapes still work: same-origin browser, the desktop
+    // shell's header-less forward, and the app scheme's own origin.
+    for (const headers of [
+      { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' },
+      {},
+      { origin: 'dsh-app://app' },
+    ]) {
+      const ok = response()
+      await handler(request('POST', { level: 'light' }, headers), ok)
+      assert.equal(ok.status, 200, JSON.stringify(headers))
+    }
+    assert.equal(controller.calls.length, 3)
+  })
+
+  it('validates every field before applying any of them', async () => {
+    const controller = stub()
+    const handler = createLevelHandler(controller)
+    // Each body has one good field and one bad one; the old handler applied the
+    // good one before rejecting the bad one, so the host changed while the
+    // panel reported a failure and rolled back.
+    for (const body of [
+      { level: 'off', reasoningEffort: 'ultra' },
+      { level: 'off', search: 'maybe' },
+      { reasoningEffort: 'low', subagents: 'maybe' },
+    ]) {
+      const res = response()
+      await handler(request('POST', body), res)
+      assert.equal(res.status, 400, JSON.stringify(body))
+    }
+    assert.deepEqual(controller.calls, [])
+  })
+
+  it('answers even when the policy is missing the instruction field', async () => {
+    const res = response()
+    await createLevelHandler(stub({ instruction: '' }))(request('GET'), res)
+    assert.equal(res.status, 200)
+    assert.equal(res.json().effective.instruction, false)
+  })
+
   it('rejects a malformed body', async () => {
     const controller = stub()
     const broken = Readable.from(['{not json'])
@@ -174,6 +247,28 @@ describe('the level store', () => {
     assert.equal(broken.read(), undefined)
     assert.equal(broken.write({ level: 'off' }), undefined) // must not throw
   })
+
+  it('replaces the file atomically and leaves no temp file behind', () => {
+    const ctx = { get: (name) => (name === 'dshHomePath' ? (...segments) => join(dir, ...segments) : undefined) }
+    const store = createLevelStore(ctx)
+    store.write({ level: 'light' })
+    store.write({ level: 'strong' })
+    assert.equal(store.read().level, 'strong')
+    assert.deepEqual(readdirSync(dirname(store.path)).filter((name) => name.endsWith('.tmp')), [])
+  })
+
+  it('ignores an oversized store file instead of blocking on it', () => {
+    const big = mkdtempSync(join(tmpdir(), 'terse-mode-big-'))
+    try {
+      const ctx = { get: (name) => (name === 'dshHomePath' ? (...segments) => join(big, ...segments) : undefined) }
+      const store = createLevelStore(ctx)
+      mkdirSync(dirname(store.path), { recursive: true })
+      writeFileSync(store.path, 'x'.repeat(1024 * 1024 + 1))
+      assert.equal(store.read(), undefined)
+    } finally {
+      rmSync(big, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('live changes through apply()', () => {
@@ -186,6 +281,7 @@ describe('live changes through apply()', () => {
       effects: [],
       guards: [],
       restrictions: [],
+      restrictionsReleased: 0,
       routes: [],
       rootEffects: [],
       waterfall: [],
@@ -196,7 +292,13 @@ describe('live changes through apply()', () => {
     }
     const tools = {
       guard: (guard) => { state.guards.push(guard); return () => {} },
-      restrict: (filter) => { state.restrictions.push(filter); return () => {} },
+      restrict: (filter) => {
+        state.restrictions.push(filter)
+        return () => {
+          state.restrictions = state.restrictions.filter((existing) => existing !== filter)
+          state.restrictionsReleased += 1
+        }
+      },
     }
     const services = {
       systemPrompt: { section: (section) => { state.sections.push(section); return () => { state.sections = state.sections.filter((s) => s !== section) } } },
@@ -232,6 +334,7 @@ describe('live changes through apply()', () => {
         if (options?.prepend) bucket.unshift(listener); else bucket.push(listener)
         return () => {}
       },
+      makeAgent,
       createAgent(id) {
         const agent = makeAgent(id)
         state.agents.push(agent)
@@ -334,7 +437,9 @@ describe('live changes through apply()', () => {
     apply(harness.ctx, { level: 'standard' })
     // The adapter advertises efforts, so the exact choice can be honoured.
     const ctx = harness.ctx
-    ctx.get('llm') // not a service here: the clamp falls back to the policy
+    harness.services.llm = {
+      resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }] } }),
+    }
 
     const high = await ctx.call('POST', { reasoningEffort: 'high' }).then((r) => r.json())
     assert.equal(high.reasoningChoice, 'high')
@@ -423,10 +528,39 @@ describe('live changes through apply()', () => {
     assert.equal(guard({ name: 'subagent' }), undefined)
   })
 
+  it('keeps existing restrictions when the agents service is unavailable', async () => {
+    harness.state.agents.push(harness.ctx.makeAgent('open'))
+    apply(harness.ctx, { level: 'standard' })
+    assert.equal(harness.state.restrictions.length, 1)
+
+    // A reload window: the service throws, which used to be read as "no agents"
+    // and disposed every restriction without rebuilding any.
+    harness.services.agents = { list() { throw new Error('reloading') } }
+    const res = await harness.ctx.call('POST', { level: 'strong' })
+    assert.equal(res.status, 200)
+    assert.equal(harness.state.restrictions.length, 1, 'the old restriction survives')
+    assert.equal(harness.state.restrictionsReleased, 0)
+    assert.ok(harness.state.logs.some(([level, , text]) => level === 'warn' && /agents service unavailable/.test(text)))
+  })
+
   it('lets the patch level win when nothing was stored', async () => {
     apply(harness.ctx, { level: 'strong' })
     const body = await harness.ctx.call('GET').then((r) => r.json())
     assert.equal(body.level, 'strong')
     assert.equal(body.reasoningChoice, 'auto')
+  })
+
+  it('remembers a panel choice even when the row omits level', async () => {
+    // `runtime.raw.level` is undefined here; writing that dropped the key from
+    // level.json, and `store.read()` refuses a file without `level` — so the
+    // choice was forgotten the moment it was made.
+    apply(harness.ctx, {})
+    const chosen = await harness.ctx.call('POST', { level: 'strong' }).then((r) => r.json())
+    assert.equal(chosen.level, 'strong')
+
+    const reopened = fakeContext()
+    apply(reopened.ctx, {})
+    const again = await reopened.ctx.call('GET').then((r) => r.json())
+    assert.equal(again.level, 'strong', 'the stored choice survives a restart')
   })
 })

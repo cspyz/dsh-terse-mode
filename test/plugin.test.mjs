@@ -19,9 +19,10 @@ import { apply, Config } from '../index.js'
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'terse-mode-plugin-home-'))
 
 /** Minimal stand-in for a Cordis context. */
-function fakeContext({ toolsBehaviour = 'normal', agents = [], modelInfo = 'reasoning', webServerLate = false } = {}) {
+function fakeContext({ toolsBehaviour = 'normal', agents = [], modelInfo = 'reasoning', webServerLate = false, sectionBehaviour = 'normal' } = {}) {
   const state = {
     sections: [],
+    sectionAttempts: 0,
     effects: [],
     // Effects registered on an `agent.ctx` live in the agent's own fiber, not
     // in the plugin's, so they must not be released with the plugin.
@@ -76,6 +77,9 @@ function fakeContext({ toolsBehaviour = 'normal', agents = [], modelInfo = 'reas
   const services = {
     systemPrompt: {
       section(section) {
+        state.sectionAttempts += 1
+        // The real reload failure: the old fiber has not released the name yet.
+        if (sectionBehaviour === 'throws-once' && state.sectionAttempts === 1) throw new Error('prompt section "plugin:terse-mode" is already registered')
         state.sections.push(section)
         return () => { state.sections = state.sections.filter((s) => s !== section) }
       },
@@ -214,6 +218,20 @@ describe('apply()', () => {
     assert.equal(agent.id, 'a1')
   })
 
+  it('retries the prompt section when the first registration is refused', async () => {
+    // Measured in the real plugin.log: a reload can apply the new generation
+    // before the old fiber releases the section name. The route already
+    // retried; the section used to stay missing while the panel said "on".
+    const retrying = fakeContext({ sectionBehaviour: 'throws-once' })
+    apply(retrying.ctx, { level: 'standard' })
+    assert.equal(retrying.state.sections.length, 0)
+    assert.ok(retrying.state.logs.some(([level, , text]) => level === 'warn' && /could not add the prompt section/.test(text)))
+
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    assert.equal(retrying.state.sections.length, 1, 'the retry registers the section')
+    assert.equal(retrying.state.sectionAttempts, 2)
+  })
+
   it('keeps the clamp outermost, so the UI model selection cannot undo it', async () => {
     apply(harness.ctx, { level: 'standard' })
     // Registered later without prepend, exactly like installModelSelection.
@@ -290,6 +308,21 @@ describe('apply()', () => {
     assert.equal('reasoningEffort' in result, false)
   })
 
+  it('sets an exact effort only when the route advertises it', async () => {
+    // Capability unknown (no metadata / a transient lookup miss): naming an
+    // effort here is what made DeepSeek fail with UNSUPPORTED_REASONING_EFFORT.
+    const unknown = fakeContext({ modelInfo: 'none' })
+    apply(unknown.ctx, { level: 'standard', reasoningEffort: 'max' })
+    const untouched = await unknown.ctx.requestConfig({ provider: 'deepseek-account', model: 'deepseek-chat' })
+    assert.equal('reasoningEffort' in untouched, false)
+
+    // Capability known and advertising the choice: honour it exactly.
+    const known = fakeContext()
+    apply(known.ctx, { level: 'standard', reasoningEffort: 'max' })
+    const exact = await known.ctx.requestConfig({ provider: 'deepseek-account', model: 'deepseek-flash' })
+    assert.equal(exact.reasoningEffort, 'max')
+  })
+
   it('is a no-op at level off', async () => {
     apply(harness.ctx, { level: 'off' })
     assert.equal(harness.state.sections.length, 0)
@@ -348,6 +381,22 @@ describe('apply()', () => {
     assert.match(guard({ name: 'workflow' }), /Subagents are turned off/)
     assert.equal(guard({ name: 'web_search' }), undefined, 'light still allows search')
     assert.equal(guard({ name: 'read' }), undefined)
+  })
+
+  it('falls back to the default subagent list when an empty one is configured', async () => {
+    // An empty list made "deny" hide nothing while the panel still said
+    // "disabled"; the fallback makes the switch mean what it says.
+    apply(harness.ctx, { level: 'light', subagents: 'deny', subagentTools: [] })
+    await harness.ctx.createAgent()
+    assert.deepEqual(harness.state.restrictions, [{ deny: ['subagent', 'subagent_fork', 'spawn_teammate', 'workflow'] }])
+    assert.ok(harness.state.logs.some(([level, , text]) => level === 'warn' && /subagentTools is empty/.test(text)))
+  })
+
+  it('warns about a subagent tool this build does not know', async () => {
+    apply(harness.ctx, { level: 'light', subagents: 'deny', subagentTools: ['task'] })
+    await harness.ctx.createAgent()
+    assert.deepEqual(harness.state.restrictions, [{ deny: ['task'] }])
+    assert.ok(harness.state.logs.some(([level, , text]) => level === 'warn' && /does not know \(task\)/.test(text)))
   })
 
   it('logs the effective policy and every fallback warning', () => {

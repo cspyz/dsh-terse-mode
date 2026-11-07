@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
         on: '有',
         none: '无',
         unchanged: '跟随模型菜单',
+        levelUnknown: '未知档位',
         settingsTitle: '改在哪里',
         setting1: '细项（思考强度 / 上限 / 是否允许搜索 / 自定义提示词）：插件目录里的 cordis.patch.yml，或在 profile 的 cordis.patch.yml 里按 id: terse-mode 覆盖。',
         setting2: '面板选的档位单独记在 $DSH_HOME/storages/dsh-terse-mode/level.json，优先于 patch；删掉它即回到 patch 的档位。',
@@ -152,6 +153,7 @@ window.__ModuleLoader__.load({
         on: 'yes',
         none: 'no',
         unchanged: 'follows the model menu',
+        levelUnknown: 'unknown level',
         settingsTitle: 'Where to change it',
         setting1: 'Fine-grained knobs (effort / cap / search / custom instruction): cordis.patch.yml in the plugin directory, or override row id: terse-mode in your profile cordis.patch.yml.',
         setting2: 'The level chosen here is stored separately in $DSH_HOME/storages/dsh-terse-mode/level.json and wins over the patch; delete that file to fall back.',
@@ -180,7 +182,20 @@ window.__ModuleLoader__.load({
 
     const LEVEL_LABEL = { off: 'levelOff', light: 'levelLight', standard: 'levelStandard', strong: 'levelStrong' }
     const LEVEL_WHAT = { off: 'levelOffWhat', light: 'levelLightWhat', standard: 'levelStandardWhat', strong: 'levelStrongWhat' }
-    const labelOf = (level) => t(LEVEL_LABEL[level] ?? level)
+    const labelOf = (level) => (typeof level === 'string' ? t(LEVEL_LABEL[level] ?? level) : t('levelUnknown'))
+
+    /**
+     * The host's `levels` list, narrowed to the strings React can render.
+     *
+     * `state?.levels ?? LEVELS` only covered null/undefined: a string reached
+     * `.map` and threw, an array of objects hit React's "objects are not valid
+     * as a child" — both took the header control and the Settings section down
+     * together. Anything unusable falls back to the built-in four levels.
+     */
+    const asLevels = (value) => {
+      const list = Array.isArray(value) ? value.filter((level) => typeof level === 'string' && level.length > 0) : []
+      return list.length > 0 ? list : LEVELS
+    }
 
     /** The reasoning-effort pills: [value, labelKey, explanationKey]. */
     const EFFORT_CHOICES = [
@@ -234,22 +249,44 @@ window.__ModuleLoader__.load({
     /** Which verb answered: the panel posts (see `readState`) once that works. */
     let readsByPost = false
 
+    /**
+     * A request that never settles used to leave `busy` true forever, which
+     * disabled every control in both views with no way back but a reload.
+     */
+    const REQUEST_TIMEOUT_MS = 10_000
+
     /** One request to one URL; returns the parsed body or throws. */
     const once = async (url, init) => {
-      const response = await fetch(url, {
-        headers: { accept: 'application/json', ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}) },
-        ...init,
-      })
-      const text = await response.text()
-      let body
+      // Not all sandboxes expose AbortController; without one the request is
+      // still attempted, it just cannot be cancelled.
+      const aborter = typeof AbortController === 'function' ? new AbortController() : undefined
+      const timer = aborter === undefined ? undefined : setTimeout(() => aborter.abort(), REQUEST_TIMEOUT_MS)
+      timer?.unref?.()
       try {
-        body = text.length === 0 ? undefined : JSON.parse(text)
-      } catch {
-        throw new Error(`HTTP ${response.status} (non-JSON body)`)
+        let response
+        try {
+          response = await fetch(url, {
+            headers: { accept: 'application/json', ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+            ...init,
+            ...(aborter === undefined ? {} : { signal: aborter.signal }),
+          })
+        } catch (error) {
+          if (aborter?.signal.aborted) throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS} ms`)
+          throw error
+        }
+        const text = await response.text()
+        let body
+        try {
+          body = text.length === 0 ? undefined : JSON.parse(text)
+        } catch {
+          throw new Error(`HTTP ${response.status} (non-JSON body)`)
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}${body?.error ? ` ${body.error}` : ''}`)
+        if (body === undefined) throw new Error('HTTP 200 with an empty body')
+        return body
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
       }
-      if (!response.ok) throw new Error(`HTTP ${response.status}${body?.error ? ` ${body.error}` : ''}`)
-      if (body === undefined) throw new Error('HTTP 200 with an empty body')
-      return body
     }
 
     /**
@@ -289,6 +326,9 @@ window.__ModuleLoader__.load({
           try {
             const body = await once(url, init)
             activeUrl = url
+            // A successful write proves the POST lane works, so later reads can
+            // skip the all-GET-first attempt that the Desktop shell rejects.
+            readsByPost = true
             return body
           } catch (error) {
             failures.push(`${url} → ${error?.message ?? error}`)
@@ -318,14 +358,28 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // Every read/write takes a ticket, and only a response at least as new as
+    // the last applied one may publish. Without this a slow background read
+    // (window focus) landed after a click and put the old level back.
+    let requestSeq = 0
+    let appliedSeq = 0
+    const claim = () => (requestSeq += 1)
+    const applyIfFresh = (seq, patch) => {
+      if (seq < appliedSeq) return false
+      appliedSeq = seq
+      publish(patch)
+      return true
+    }
+
     /** Read the host state; keeps the real failure reason for diagnostics. */
     const load = async () => {
+      const seq = claim()
       try {
         const next = await fetchState()
-        publish({ state: next, error: null, detail: null })
+        applyIfFresh(seq, { state: next, error: null, detail: null })
         return true
       } catch (failure) {
-        publish({ detail: `${environment()} · ${String(failure?.message ?? failure)}`, error: t('offlineHint') })
+        applyIfFresh(seq, { detail: `${environment()} · ${String(failure?.message ?? failure)}`, error: t('offlineHint') })
         return false
       }
     }
@@ -333,13 +387,25 @@ window.__ModuleLoader__.load({
     /** POST one change; optimistic, and reverted with a reason on failure. */
     const mutate = async (body, optimistic) => {
       if (store.busy) return
+      const seq = claim()
       const previous = store.state
       publish({ busy: true, error: null, state: { ...(store.state ?? {}), ...optimistic } })
       try {
         const next = await fetchState({ method: 'POST', body: JSON.stringify(body) })
-        publish({ state: next, error: null, detail: null })
+        applyIfFresh(seq, { state: next, error: null, detail: null })
       } catch (failure) {
-        publish({ state: previous, detail: `${environment()} · ${String(failure?.message ?? failure)}`, error: t('offlineHint') })
+        // Roll back only the keys this click wrote: replacing the whole state
+        // with the pre-click snapshot also threw away a fresher background read.
+        if (seq >= appliedSeq) {
+          appliedSeq = seq
+          const revert = {}
+          for (const key of Object.keys(optimistic)) revert[key] = previous?.[key]
+          publish({
+            state: { ...(store.state ?? {}), ...revert },
+            detail: `${environment()} · ${String(failure?.message ?? failure)}`,
+            error: t('offlineHint'),
+          })
+        }
       } finally {
         publish({ busy: false })
       }
@@ -501,7 +567,7 @@ window.__ModuleLoader__.load({
         void post({ search: next }, { searchChoice: next })
       }
 
-      const levels = state?.levels ?? LEVELS
+      const levels = asLevels(state?.levels)
       const effective = state?.effective
       const effortText = effective
         ? (effective.reasoningEffort ? labelOf(effective.reasoningEffort) : t('unchanged'))
@@ -936,6 +1002,9 @@ window.__ModuleLoader__.load({
       // threw a ReferenceError that the Settings shell swallowed as a blank page.
       const searchNow = searchState(state)
       const searchChoiceNow = state?.searchChoice ?? 'auto'
+      // Same normalisation as the header: a string or an array of objects here
+      // used to take the whole Settings section down.
+      const levels = asLevels(state?.levels)
 
       const bigPill = (key, label, active, onClick, title, accent) => h('button', {
         key,
@@ -975,14 +1044,14 @@ window.__ModuleLoader__.load({
 
         h('div', { key: 'levels', style: { marginBottom: '14px' } }, [
           h('div', { key: 'h', style: { color: TOKEN.tertiary, marginBottom: '6px' } }, t('whatTitle')),
-          h('div', { key: 'pills', style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } }, (state?.levels ?? LEVELS).map((level) => bigPill(
+          h('div', { key: 'pills', style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } }, levels.map((level) => bigPill(
             level,
             labelOf(level),
             state?.level === level,
             () => chooseLevel(level),
             t(LEVEL_WHAT[level] ?? level),
           ))),
-          h('div', { key: 'list', style: { marginTop: '8px' } }, (state?.levels ?? LEVELS).map((level) => h('div', {
+          h('div', { key: 'list', style: { marginTop: '8px' } }, levels.map((level) => h('div', {
             key: level,
             style: {
               display: 'flex',

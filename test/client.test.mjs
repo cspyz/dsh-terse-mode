@@ -78,6 +78,7 @@ function loadClient(overrides = {}) {
     fetch: overrides.fetch ?? (async () => { throw new Error('Failed to fetch') }),
     setTimeout,
     clearTimeout,
+    AbortController,
     console,
     URL,
     Error,
@@ -134,6 +135,33 @@ function render(element, depth = 0, text = []) {
   if (children !== undefined) render(children, depth + 1, text)
   return text
 }
+
+/** A complete host state, with overrides for the malformed cases below. */
+const stateOf = (level, extra = {}) => JSON.stringify({
+  level,
+  levels: ['off', 'light', 'standard', 'strong'],
+  reasoningChoice: 'auto',
+  searchChoice: 'auto',
+  subagents: 'allow',
+  effective: { reasoningEffort: 'low', reasoningMode: 'cap', maxTokens: null, search: 'deny', instruction: true },
+  ...extra,
+})
+
+/** Find the first element in a rendered tree that matches. */
+function findBy(tree, predicate) {
+  if (tree === null || tree === undefined || typeof tree !== 'object') return undefined
+  if (Array.isArray(tree)) {
+    for (const child of tree) {
+      const hit = findBy(child, predicate)
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+  if (predicate(tree)) return tree
+  return findBy(tree.props?.children, predicate)
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('the client half renders', () => {
   it('registers the header control and the Settings section', () => {
@@ -202,5 +230,71 @@ describe('the client half renders', () => {
         assert.ok(text.includes(label), `${slot} is missing the ${label} block`)
       }
     }
+  })
+
+  it('falls back to the built-in levels when the host sends a malformed list', async () => {
+    // `state?.levels ?? LEVELS` let a string reach `.map` and an array of
+    // objects reach React; both crashed the header and the Settings section.
+    for (const levels of ['off,light', [], [{}], 42, null]) {
+      const { registered } = loadClient({
+        fetch: async () => ({ ok: true, status: 200, text: async () => stateOf('standard', { levels }) }),
+      })
+      for (const { slot, component } of registered) {
+        assert.doesNotThrow(() => render(component({})), `${slot} threw on levels=${JSON.stringify(levels)}`)
+      }
+      await tick()
+      for (const { slot, component } of registered) {
+        assert.doesNotThrow(() => render(component({})), `${slot} threw on levels=${JSON.stringify(levels)} after load`)
+      }
+      const header = registered.find((entry) => entry.slot === 'conversation.session.header.actions').component
+      const text = render(header({})).join(' ')
+      assert.ok(text.includes('强'), 'the four built-in levels are still rendered')
+    }
+  })
+
+  it('arms an abort signal on every request', async () => {
+    const seen = []
+    const { registered } = loadClient({
+      fetch: async (url, init) => {
+        seen.push(init)
+        return { ok: true, status: 200, text: async () => stateOf('standard') }
+      },
+    })
+    const header = registered.find((entry) => entry.slot === 'conversation.session.header.actions').component
+    render(header({}))
+    await tick()
+    assert.ok(seen.length >= 1)
+    assert.ok(seen[0].signal, 'a hung request must be cancellable')
+    assert.equal(typeof seen[0].signal.aborted, 'boolean')
+  })
+
+  it('drops a stale read that lands after a newer click', async () => {
+    let releaseRead
+    const readHeld = new Promise((resolve) => { releaseRead = resolve })
+    const { registered } = loadClient({
+      fetch: async (url, init) => {
+        if ((init?.method ?? 'GET') === 'GET') {
+          await readHeld
+          return { ok: true, status: 200, text: async () => stateOf('off') }
+        }
+        return { ok: true, status: 200, text: async () => stateOf('strong') }
+      },
+    })
+    const header = registered.find((entry) => entry.slot === 'conversation.session.header.actions').component
+
+    // The initial read hangs; a click answers first; then the old read lands.
+    const tree = header({})
+    const strong = findBy(tree, (node) => node?.props?.['data-level'] === 'strong')
+    assert.ok(strong, 'the header renders the level buttons')
+    strong.props.onClick()
+    await tick()
+    releaseRead()
+    await tick()
+
+    const after = header({})
+    const strongAfter = findBy(after, (node) => node?.props?.['data-level'] === 'strong')
+    const offAfter = findBy(after, (node) => node?.props?.['data-level'] === 'off')
+    assert.equal(strongAfter.props['aria-pressed'], 'true', 'the click wins')
+    assert.equal(offAfter.props['aria-pressed'], 'false', 'the stale read was dropped')
   })
 })

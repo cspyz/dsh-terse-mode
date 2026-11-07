@@ -32,7 +32,7 @@
  *   node tools/install-terse-mode.mjs --status
  *   node tools/install-terse-mode.mjs --uninstall
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -82,7 +82,8 @@ const fail = (message) => {
 if (!existsSync(manifestPath)) fail(`找不到 profile 清单：${manifestPath}（profile 名字或 DSH_HOME 不对？）`)
 if (!existsSync(packageDir)) fail(`找不到插件目录：${packageDir}`)
 
-const manifestRaw = readFileSync(manifestPath, 'utf8')
+// A Windows editor can save the manifest with a BOM; JSON.parse rejects it.
+const manifestRaw = readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, '')
 let manifest
 try {
   manifest = JSON.parse(manifestRaw)
@@ -102,6 +103,26 @@ const patchHasRow = () => readPatch().includes(MARK_START)
 function bundleLevel() {
   const match = /^\s*level:\s*(\S+)\s*$/m.exec(existsSync(bundlePatchPath) ? readFileSync(bundlePatchPath, 'utf8') : '')
   return match && LEVELS.includes(match[1]) ? match[1] : 'standard'
+}
+
+/** The managed block, so a `level:` line from another row cannot be read. */
+function markedBlock() {
+  const text = readPatch()
+  const start = text.indexOf(MARK_START)
+  if (start < 0) return ''
+  const end = text.indexOf(MARK_END, start)
+  return end < 0 ? text.slice(start) : text.slice(start, end + MARK_END.length)
+}
+
+/** The level in the managed block, or undefined when the row is absent. */
+function patchLevel() {
+  const match = /^\s*level:\s*(\S+)\s*$/m.exec(markedBlock())
+  return match?.[1]
+}
+
+/** Where a junction/symlink actually points, without following non-links. */
+function linkTarget(path) {
+  try { return realpathSync(path) } catch { return undefined }
 }
 
 function rowBlock(levelValue) {
@@ -155,7 +176,7 @@ function status() {
   say(`插件目录       : ${packageDir}`)
   say(`依赖条目       : ${installedSpec() ?? '(没有)'}`)
   say(`node_modules   : ${describePath(linkPath)}`)
-  say(`profile patch  : ${patchHasRow() ? `已插入行 ${ROW_ID}（level=${readPatch().match(/^\s*level:\s*(\S+)\s*$/m)?.[1] ?? '?'}）` : '(没有插入行)'}`)
+  say(`profile patch  : ${patchHasRow() ? `已插入行 ${ROW_ID}（level=${patchLevel() ?? '?'}）` : '(没有插入行)'}`)
   say(`bundles        : ${bundles().length ? bundles().join(', ') : '(空)'}（含插件: ${bundles().includes(PACKAGE_NAME) ? '是' : '否'}）`)
 }
 
@@ -163,7 +184,7 @@ function describePath(path) {
   if (!existsSync(path)) return '(不存在)'
   try {
     const stat = lstatSync(path)
-    if (stat.isSymbolicLink()) return `junction/symlink → ${resolve(path)}`
+    if (stat.isSymbolicLink()) return `junction/symlink → ${linkTarget(path) ?? '(目标不可读)'}`
     return stat.isDirectory() ? '(真实目录)' : '(不是目录)'
   } catch (error) {
     return `(读不到: ${String(error.message)})`
@@ -172,7 +193,9 @@ function describePath(path) {
 
 // ---------------------------------------------------------------- backup ----
 function backup() {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  // Milliseconds matter: two installs in the same second used to overwrite
+  // each other's backup, which is the one copy of the pre-change profile.
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23)
   const dir = join(workspace, '.backup', `${PACKAGE_NAME}-${stamp}`)
   if (dryRun) {
     say(`[dry-run] 会备份 package.json、cordis.patch.yml 到 ${dir}`)
@@ -215,7 +238,25 @@ function install() {
   if (!patchHasRow()) changes.push(`cordis.patch.yml += insert 行 ${ROW_ID}`)
   else if (rowOutdated) changes.push(`cordis.patch.yml 的行 ${ROW_ID} 与当前模板不一致（会改写）`)
   if (bundles().includes(PACKAGE_NAME)) changes.push(`dsh.profile.bundles -= ${PACKAGE_NAME}（避免 bundle 行与 profile 行把插件挂两次）`)
-  if (!existsSync(linkPath)) changes.push(`junction ${linkPath} → ${packageDir}`)
+
+  // A junction that exists is not necessarily a junction to *this* checkout:
+  // the workspace can be moved or copied, and the old target keeps loading the
+  // old code while every other marker says the install is current.
+  let linkStat
+  try { linkStat = lstatSync(linkPath) } catch { linkStat = undefined }
+  const linkIsSymlink = linkStat?.isSymbolicLink() === true
+  const linkIsRealDirectory = linkStat !== undefined && !linkIsSymlink
+  const packageTarget = linkTarget(packageDir)
+  const currentLinkTarget = linkIsSymlink ? linkTarget(linkPath) : undefined
+  const linkMatches = linkIsSymlink && packageTarget !== undefined && currentLinkTarget === packageTarget
+
+  if (!linkMatches && !linkIsRealDirectory) {
+    if (linkIsSymlink) changes.push(`junction ${linkPath} 当前 → ${currentLinkTarget ?? '(目标不可读)'}（会重建为 ${packageDir}）`)
+    else changes.push(`junction ${linkPath} → ${packageDir}`)
+  }
+  if (linkIsRealDirectory) {
+    say(`注意：${linkPath} 是真实目录，不是 junction；我不会删除或替换它。若它不是当前插件，请手工处理。`)
+  }
 
   if (changes.length === 0) say('已经是目标状态，无需改动。')
   else {
@@ -249,10 +290,11 @@ function install() {
   }
   if (level) setLevel(level)
 
-  if (!existsSync(linkPath)) {
+  if (!linkMatches && !linkIsRealDirectory) {
+    if (linkIsSymlink) unlinkSync(linkPath)
     mkdirSync(join(profileDir, 'node_modules'), { recursive: true })
     symlinkSync(packageDir, linkPath, 'junction')
-    say(`已创建 junction：${linkPath} → ${packageDir}`)
+    say(`已${linkIsSymlink ? '重建' : '创建'} junction：${linkPath} → ${packageDir}`)
   }
 
   say('\n下一步：')
@@ -275,10 +317,21 @@ function uninstallNow() {
   }
   backup()
   if (removeRow()) say(`已从 ${profilePatchPath} 移除插入行`)
-  if (spec !== undefined) delete manifest.dependencies[PACKAGE_NAME]
-  if (manifest.dsh?.profile) manifest.dsh.profile.bundles = bundles().filter((name) => name !== PACKAGE_NAME)
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
-  say(`已从 ${manifestPath} 移除插件条目`)
+  let manifestChanged = false
+  if (spec !== undefined) {
+    delete manifest.dependencies[PACKAGE_NAME]
+    manifestChanged = true
+  }
+  if (Array.isArray(manifest.dsh?.profile?.bundles) && manifest.dsh.profile.bundles.includes(PACKAGE_NAME)) {
+    manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter((name) => name !== PACKAGE_NAME)
+    manifestChanged = true
+  }
+  // Only rewrite the user's manifest when something was actually removed:
+  // a bare `--uninstall` on a row-only install used to reformat it for nothing.
+  if (manifestChanged) {
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+    say(`已从 ${manifestPath} 移除插件条目`)
+  }
 
   if (existsSync(linkPath)) {
     if (lstatSync(linkPath).isSymbolicLink()) {

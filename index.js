@@ -121,6 +121,7 @@ export function apply(ctx, config) {
     /** The live policy. Everything reads this, never a captured copy. */
     policy: normalizeConfig(config),
     sectionDispose: undefined,
+    sectionTimer: undefined,
     restrictions: new Set(),
   }
   runtime.policy = normalizeConfig(runtime.raw)
@@ -132,7 +133,16 @@ export function apply(ctx, config) {
   for (const warning of runtime.policy.warnings) log('warn', warning)
 
   // ------------------------------------------------------------- prompt ----
-  const syncInstruction = () => {
+  // A reload can apply the new generation before the old fiber releases its
+  // section, so the first registration is refused with "already registered".
+  // The route already retries with backoff; the section — the actual
+  // "be terse" feature — used to give up and stay silent. Same shape here.
+  const SECTION_RETRY_DELAYS = [250, 1000, 3000]
+  const syncInstruction = (attempt = 0) => {
+    if (runtime.sectionTimer !== undefined) {
+      clearTimeout(runtime.sectionTimer)
+      runtime.sectionTimer = undefined
+    }
     dispose(runtime.sectionDispose)
     runtime.sectionDispose = undefined
     if (!runtime.policy.instruction) return
@@ -145,6 +155,11 @@ export function apply(ctx, config) {
       }), `${PLUGIN_NAME}.section()`)
     } catch (error) {
       log('warn', `could not add the prompt section: ${message(error)}`)
+      if (attempt < SECTION_RETRY_DELAYS.length) {
+        runtime.sectionTimer = setTimeout(() => syncInstruction(attempt + 1), SECTION_RETRY_DELAYS[attempt])
+        // Do not hold a test/CLI process open for a retry.
+        runtime.sectionTimer?.unref?.()
+      }
     }
   }
 
@@ -189,9 +204,21 @@ export function apply(ctx, config) {
   }
 
   const syncRestrictions = () => {
+    if (deniedTools(runtime.policy).length === 0) {
+      disposeRestrictions()
+      return
+    }
+    // Never tear the old restrictions down before the replacement list is
+    // known: the agents service is briefly unavailable during a reload, and
+    // the dispose-then-rebuild order left the model seeing tools the policy
+    // still claimed to hide (only the call-time guard remained).
+    const agents = liveAgents(ctx)
+    if (agents === undefined) {
+      log('warn', 'agents service unavailable; keeping the existing tool restrictions')
+      return
+    }
     disposeRestrictions()
-    if (deniedTools(runtime.policy).length === 0) return
-    for (const agent of liveAgents(ctx)) restrictAgent(agent)
+    for (const agent of agents) restrictAgent(agent)
   }
 
   // Always registered; it consults the live policy per agent, so a level change
@@ -244,7 +271,10 @@ export function apply(ctx, config) {
     runtime.raw = next
     runtime.policy = normalizeConfig(next)
     store.write({
-      level: runtime.raw.level,
+      // `raw.level` is undefined when the row omitted `level`. Writing that
+      // drops the key from the JSON, and `store.read()` refuses a file without
+      // it — the panel's choice then looked applied but was gone on restart.
+      level: runtime.raw.level ?? runtime.policy.level,
       reasoningEffort: runtime.raw.reasoningEffort ?? 'auto',
       search: runtime.raw.search ?? 'auto',
       subagents: runtime.policy.subagents,
@@ -276,6 +306,8 @@ export function apply(ctx, config) {
   // and `ctx.on` registrations release themselves.
   try {
     ctx.effect(() => () => {
+      if (runtime.sectionTimer !== undefined) clearTimeout(runtime.sectionTimer)
+      runtime.sectionTimer = undefined
       dispose(runtime.sectionDispose)
       disposeRestrictions()
     }, `${PLUGIN_NAME}.runtime()`)
@@ -323,22 +355,30 @@ export function apply(ctx, config) {
 
 /** Clamp reasoning effort and output size on every model request. */
 function registerRequestClamp(ctx, runtime, log) {
-  // Exact-model capability, resolved once per provider/model for the life of
-  // this plugin generation. Without it we could not tell a route that carries
-  // no effort yet (because the adapter default is applied *after* this
-  // waterfall) from one that cannot reason at all — and naming an unsupported
-  // effort makes the request fail with UNSUPPORTED_REASONING_EFFORT.
+  // Exact-model capability, cached per provider/model with a short TTL. Without
+  // it we could not tell a route that carries no effort yet (because the
+  // adapter default is applied *after* this waterfall) from one that cannot
+  // reason at all — and naming an unsupported effort makes the request fail
+  // with UNSUPPORTED_REASONING_EFFORT.
+  //
+  // The TTL matters because the answer can be "no metadata yet": caching that
+  // forever (the old `set(key, undefined)`) left the route unknown for the rest
+  // of the plugin's life after one transient miss.
+  const EFFORTS_TTL_MS = 30_000
   const effortsByRoute = new Map()
   let llm
   const effortsFor = async (provider, model, signal) => {
     const key = `${provider}|${model}`
-    if (effortsByRoute.has(key)) return effortsByRoute.get(key)
+    const hit = effortsByRoute.get(key)
+    if (hit !== undefined && Date.now() - hit.at < EFFORTS_TTL_MS) return hit.efforts
     try {
-      llm ??= ctx.get?.('llm')
+      // Re-read on every TTL miss: the `llm` service can be replaced while the
+      // plugin is mounted, and a stale handle would keep answering for it.
+      llm = ctx.get?.('llm') ?? llm
       if (typeof llm?.resolveModelInfo !== 'function') return undefined
       const info = await llm.resolveModelInfo(provider, model, signal)
       const efforts = effortsOf(info)
-      effortsByRoute.set(key, efforts)
+      effortsByRoute.set(key, { at: Date.now(), efforts })
       return efforts
     } catch (error) {
       log('warn', `could not read the reasoning capability of ${key}: ${message(error)}`)
@@ -405,12 +445,20 @@ function resolveTools(agentCtx) {
   }
 }
 
-/** Agents that already exist (a config reload, or a row enabled mid-session). */
+/**
+ * Agents that already exist (a config reload, or a row enabled mid-session).
+ *
+ * `undefined` means "unknown" — the service is missing, still mounting, or
+ * threw — which is not the same as "there are no agents". Callers must not
+ * dispose live restrictions on an unknown answer.
+ */
 function liveAgents(ctx) {
   try {
-    return ctx.get?.('agents')?.list?.() ?? []
+    const agents = ctx.get?.('agents')
+    if (agents === undefined) return undefined
+    return agents.list?.() ?? []
   } catch {
-    return []
+    return undefined
   }
 }
 
