@@ -13,8 +13,14 @@ A DeepSeek Harness plugin: four levels that sit in the conversation header, plus
 ## Install
 
 ```sh
-dsh plugin --profile web add github:cspyz/dsh-terse-mode        # dsh web
-dsh plugin --profile desktop add github:cspyz/dsh-terse-mode    # desktop app
+dsh plugin --profile web add dsh-terse-mode        # dsh web
+dsh plugin --profile desktop add dsh-terse-mode    # desktop app
+```
+
+That resolves through npm. To pin a commit instead — or to try a build that is not published yet — install straight from the repository:
+
+```sh
+dsh plugin --profile web add github:cspyz/dsh-terse-mode
 ```
 
 The two profiles are independent — install once per profile if you use both. Restart DSH once (or reload the page); the control then appears in the conversation header.
@@ -113,9 +119,11 @@ A choice made in the panel wins over `level` in this file; delete the storage fi
 ## Uninstall
 
 ```sh
-dsh plugin --profile web remove github:cspyz/dsh-terse-mode
-dsh plugin --profile desktop remove github:cspyz/dsh-terse-mode
+dsh plugin --profile web remove dsh-terse-mode
+dsh plugin --profile desktop remove dsh-terse-mode
 ```
+
+Use the same spec you installed with — `github:cspyz/dsh-terse-mode` if you pinned the repository.
 
 If you installed with the script, run `node tools/install-terse-mode.mjs --uninstall` (desktop) or add `--profile web`. It backs up the profile manifest and patch to `.backup/<timestamp>/` in the workspace first.
 

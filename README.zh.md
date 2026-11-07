@@ -13,8 +13,14 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:cspyz/dsh-terse-mode        # 网页端
-dsh plugin --profile desktop add github:cspyz/dsh-terse-mode    # 桌面端
+dsh plugin --profile web add dsh-terse-mode        # 网页端
+dsh plugin --profile desktop add dsh-terse-mode    # 桌面端
+```
+
+这两条走 npm。想锁定某个提交、或者试还没发布的构建，就从仓库装：
+
+```sh
+dsh plugin --profile web add github:cspyz/dsh-terse-mode
 ```
 
 两个 profile 相互独立，两边都用就各装一次。装完**刷新一次页面**，控件出现在对话页顶部。
@@ -216,6 +222,8 @@ curl -X POST -H 'content-type: application/json' -d '{"level":"strong"}' http://
   这条命令不参与启动，插件运行不受影响。
 
 ## 脚本安装细节与卸载
+
+用 `dsh plugin` 装的，卸载就是 `dsh plugin --profile <名字> remove dsh-terse-mode`（仓库装的就用 `github:cspyz/dsh-terse-mode`）。下面是脚本方式的完整命令：
 
 ```sh
 # 看当前状态
