@@ -1,27 +1,40 @@
 # dsh-terse-mode — 少想、少搜、少废话
 
-一个 DSH（DeepSeek Harness）插件，给同一 profile 里的所有会话（含子 agent）加一层可随时调的约束：
+一个 DSH（DeepSeek Harness）插件：四档强度常驻对话页顶部，思考强度 / 联网搜索 / 子代理三个开关各自独立可调，改完立即生效。
+
+**它不是「回答更短」那一类。** 同类插件多在比谁压得更狠，这里的取舍是**可控**：四档给你一个总开关，三个开关让你单独拧某一项，而**四个档位都不设输出上限**——长度只由「直接答、别复述」这条指令引导，不会被硬截断。
+
+## 安装
+
+```sh
+dsh plugin --profile web add github:cspyz/dsh-terse-mode        # 网页端
+dsh plugin --profile desktop add github:cspyz/dsh-terse-mode    # 桌面端
+```
+
+两个 profile 相互独立，两边都用就各装一次。装完**刷新一次页面**，控件出现在对话页顶部。
+
+> **装完重启却不见了？** Desktop 宿主的已知行为：重启时重写 profile 的 `package.json`，把插件的条目从 `dsh.profile.bundles` 里抹掉。改用下面的脚本方式——它把安装行写进 profile 自己的 `cordis.patch.yml`（用户层，宿主只做外科式改动、不改它）：
+
+```sh
+node tools/install-terse-mode.mjs                   # 桌面端
+node tools/install-terse-mode.mjs --profile web     # 网页端
+```
+
+它只动 profile 四处：`package.json` 一条 `link:` 依赖、`node_modules` 一个 junction、`cordis.patch.yml` 一行带标记的 `insert`（非 desktop profile 再补 `dsh.profile.bundles`）。不跑 pnpm、不碰 lockfile，其他已装插件不受影响，卸载全量还原。
+
+## 它做什么
 
 - **少想**：把模型请求的推理强度压到档位值，简单问题不再想很久；
 - **少搜**：`web_search` / `web_fetch` 按档位或开关关闭——新会话里模型根本看不到这两个工具，老会话里真调用也会被拒绝；
-- **少废话**：系统提示词最后加一条「直接答、别复述、别总结自己」的指令，**不设硬性输出上限**，回答长度只由指令引导；
+- **少废话**：系统提示词最后加一条「直接答、别复述、别总结自己」的指令，**不设硬性输出上限**；
 - **少委派**：可一键禁用子代理（`subagent` / `subagent_fork` / `spawn_teammate` / `workflow` 四个工具从模型眼前隐藏）。
 
-四档强度 + 三个独立开关（思考强度 / 联网搜索 / 子代理），在**对话页顶部的常驻控件**和 **DSH 设置页的「简洁模式」一节**里都能直接改，改完立即生效。
+两个入口，同一份设置：
 
 | 入口 | 位置 | 能做什么 |
 |---|---|---|
 | 顶部控件 | 对话页 header（「智能体团队 / 标准模式」那一行） | 切档位、开关联网、开关子代理、`?` 展开全部说明 |
 | 设置页 | 设置 → 简洁模式 | 同样的控制项 + 每档解释 + 当前实际生效值 + 改在哪里的说明 |
-
-## 快速开始
-
-```bash
-node tools/install-terse-mode.mjs                   # 桌面端（profiles/desktop）
-node tools/install-terse-mode.mjs --profile web     # 网页端（dsh web 用的 profiles/web）
-```
-
-装完**刷新一次页面**即可看到控件；改档位/开关不需要重启。
 
 ## 档位
 
@@ -196,7 +209,7 @@ curl -X POST -H 'content-type: application/json' -d '{"level":"strong"}' http://
   所以 `dsh --dump-config-schema` 会对本行多报一条 `Config is not a native Schemastery schema`。
   这条命令不参与启动，插件运行不受影响。
 
-## 安装 / 卸载
+## 脚本安装细节与卸载
 
 ```sh
 # 看当前状态
