@@ -18,6 +18,12 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
+    // react-dom lives in the same browser module table the plugin market uses.
+    // Look it up softly: a host build that cannot resolve it keeps the inline
+    // popover rather than losing the whole control.
+    const ReactDOM = (() => {
+      try { return require('react-dom') } catch { return null }
+    })()
 
     const NS = 'dsh-terse-mode'
     const SLOT = 'conversation.session.header.actions'
@@ -503,12 +509,50 @@ window.__ModuleLoader__.load({
       shadow: 'var(--dsw-shadow-lv2, 0 8px 24px rgba(31,35,40,.16))',
     }
 
+    // ------------------------------------------------------------- portal --
+    /**
+     * The one container the popover portals into: created on first use, kept for
+     * the life of the page, and re-appended on every mount so it stays last among
+     * `document.body`'s children.
+     *
+     * Why this exists: the header row is not ours. A `position: fixed` box left
+     * inside it inherits the row's stacking context, and the host's own layers go
+     * up to `z-index: 1100` — so the popover painted underneath the conversation
+     * and read as "clicking ? does nothing". The plugin market's layers use this
+     * same lane for the same reason.
+     */
+    let portalHost = null
+    const portalContainer = () => {
+      // Guarded: a view-level test double, or a host that renders this module
+      // outside a real DOM, gets the inline popover instead of a crash.
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null
+      if (portalHost === null) {
+        portalHost = document.createElement('div')
+        portalHost.setAttribute('data-dsh-terse-mode-portal', '')
+      }
+      return portalHost
+    }
+    // Layout effect in the browser (so the container is attached before paint),
+    // whichever effect the host's React build exposes.
+    const useMountEffect = React.useLayoutEffect ?? React.useEffect
+    function usePortalHost() {
+      const host = portalContainer()
+      useMountEffect(() => {
+        if (!host || typeof document === 'undefined' || !document.body) return undefined
+        document.body.appendChild(host)
+        return undefined
+      }, [host])
+      return host
+    }
+
     function TerseModeControl() {
       const { state, error, detail, busy } = useStore()
       const [open, setOpen] = React.useState(false)
       const [anchor, setAnchor] = React.useState(null)
       const box = React.useRef(null)
       const helpButton = React.useRef(null)
+      const popoverBox = React.useRef(null)
+      const portalHostNode = usePortalHost()
 
       // The popover is positioned from the button's viewport rect, because the
       // header row is not ours to restyle and a clipped absolute box would hide
@@ -534,7 +578,13 @@ window.__ModuleLoader__.load({
       // Dismiss the popover the way a menu should.
       React.useEffect(() => {
         if (!open) return undefined
-        const onDown = (event) => { if (!box.current?.contains(event.target)) setOpen(false) }
+        const onDown = (event) => {
+          const target = event.target
+          // The popover no longer lives inside `box`, so it has to be checked
+          // separately — otherwise the first click inside it dismisses it.
+          if (box.current?.contains(target) || popoverBox.current?.contains(target)) return
+          setOpen(false)
+        }
         const onKey = (event) => { if (event.key === 'Escape') setOpen(false) }
         document.addEventListener('mousedown', onDown)
         document.addEventListener('keydown', onKey)
@@ -660,13 +710,14 @@ window.__ModuleLoader__.load({
 
       const popover = open && anchor !== null ? h('div', {
         key: 'popover',
+        ref: popoverBox,
         role: 'dialog',
         'aria-label': t('help'),
         style: {
           position: 'fixed',
           top: `${anchor.top}px`,
           right: `${anchor.right}px`,
-          zIndex: 60,
+          zIndex: 1200,
           width: 'min(388px, 86vw)',
           maxHeight: 'min(70vh, 520px)',
           overflowY: 'auto',
@@ -838,6 +889,12 @@ window.__ModuleLoader__.load({
         ]),
       ]) : null
 
+      // Rendered through the portal when react-dom is available, so neither the
+      // header's stacking context nor its clipping can reach the popover.
+      const popoverLayer = popover && ReactDOM && portalHostNode
+        ? ReactDOM.createPortal(popover, portalHostNode)
+        : popover
+
       return h('div', {
         ref: box,
         'data-plugin': 'dsh-terse-mode',
@@ -980,7 +1037,7 @@ window.__ModuleLoader__.load({
             },
           }, detail) : null,
         ]) : null,
-        popover,
+        popoverLayer,
       ])
     }
 
