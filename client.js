@@ -604,19 +604,6 @@ window.__ModuleLoader__.load({
         void post({ reasoningEffort: value }, { reasoningChoice: value })
       }
 
-      const toggleSubagents = () => {
-        const next = (state?.subagents ?? 'allow') === 'deny' ? 'allow' : 'deny'
-        if (busy) return
-        void post({ subagents: next }, { subagents: next })
-      }
-
-      /** The header switch flips the effective state and makes it explicit. */
-      const toggleSearch = () => {
-        if (busy) return
-        const next = searchState(state) === 'deny' ? 'allow' : 'deny'
-        void post({ search: next }, { searchChoice: next })
-      }
-
       const levels = asLevels(state?.levels)
       const effective = state?.effective
       const effortText = effective
@@ -625,8 +612,11 @@ window.__ModuleLoader__.load({
       const searchText = effective?.search === 'deny' ? t('searchOff') : t('searchOn')
       const searchNow = searchState(state)
       const searchChoiceNow = state?.searchChoice ?? 'auto'
+      const subagentText = (state?.subagents ?? 'allow') === 'deny' ? t('subagentDeny') : t('subagentAllow')
+      // The switches are no longer visible, so this hover readout is where their
+      // state can still be checked without opening the popover.
       const summary = effective
-        ? `${t('think')} ${effortText} · ${t('cap')} ${effective.maxTokens ?? t('unlimited')} · ${t('search')} ${searchText}`
+        ? `${t('think')} ${effortText} · ${t('cap')} ${effective.maxTokens ?? t('unlimited')} · ${t('search')} ${searchText} · ${t('subagentTitle')} ${subagentText}`
         : ''
 
       const segment = (level) => {
@@ -642,16 +632,29 @@ window.__ModuleLoader__.load({
           'data-level': level,
           style: {
             font: 'inherit',
-            fontSize: '12px',
-            lineHeight: '20px',
-            padding: '1px 8px',
+            // 14px matches the host's own header controls, so the row reads as
+            // one toolbar rather than an embedded widget.
+            fontSize: '14px',
+            lineHeight: '22px',
+            // Equal width for every level: "关/轻/强" and "标准" must sit on the
+            // same rhythm, otherwise the selected pill changes size as you move
+            // across the row and the whole control reads as hand-placed text.
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '40px',
+            height: '26px',
+            padding: 0,
             border: 'none',
-            borderRadius: '6px',
+            borderRadius: '7px',
             cursor: busy ? 'default' : 'pointer',
-            background: on ? TOKEN.layer1 : 'transparent',
-            color: on ? TOKEN.label : TOKEN.secondary,
+            // A solid brand fill is the only thing in this row that carries
+            // colour, which is exactly what makes the current level findable at
+            // a glance.
+            background: on ? TOKEN.brand : 'transparent',
+            color: on ? '#fff' : TOKEN.secondary,
             fontWeight: on ? 600 : 400,
-            boxShadow: on ? 'var(--dsw-shadow-lv1, 0 1px 2px rgba(31,35,40,.12))' : 'none',
+            boxShadow: 'none',
             transition: 'background .12s ease,color .12s ease',
           },
         }, labelOf(level))
@@ -902,9 +905,9 @@ window.__ModuleLoader__.load({
           position: 'relative',
           display: 'inline-flex',
           alignItems: 'center',
-          gap: '6px',
-          fontSize: '12px',
-          lineHeight: '20px',
+          gap: '8px',
+          fontSize: '14px',
+          lineHeight: '22px',
           color: TOKEN.secondary,
           whiteSpace: 'nowrap',
         },
@@ -916,61 +919,19 @@ window.__ModuleLoader__.load({
           'aria-label': t('label'),
           style: {
             display: 'inline-flex',
+            alignItems: 'center',
             gap: '2px',
-            padding: '1px',
+            // 2px padding + 1px border around a 26px button = 32px overall.
+            // White fill, so the only colour in the control is the active level.
+            padding: '2px',
             border: `1px solid ${TOKEN.border}`,
-            borderRadius: '8px',
-            background: TOKEN.layer2,
+            borderRadius: '9px',
+            background: TOKEN.layer1,
           },
         }, levels.map(segment)),
-        // One click toggles the subagent lane: hiding the four creation tools is
-        // the difference between "the agent delegates everything" and "it does
-        // the work here".
-        h('button', {
-          key: 'subagents',
-          type: 'button',
-          'aria-pressed': (state?.subagents ?? 'allow') === 'deny' ? 'true' : 'false',
-          disabled: busy,
-          title: t((state?.subagents ?? 'allow') === 'deny' ? 'subagentWhatDeny' : 'subagentWhatAllow'),
-          'data-subagents': state?.subagents ?? 'allow',
-          onClick: () => toggleSubagents(),
-          style: {
-            font: 'inherit',
-            fontSize: '12px',
-            lineHeight: '18px',
-            padding: '1px 7px',
-            borderRadius: '999px',
-            cursor: busy ? 'default' : 'pointer',
-            border: `1px solid ${(state?.subagents ?? 'allow') === 'deny' ? TOKEN.error : TOKEN.border}`,
-            background: 'transparent',
-            color: (state?.subagents ?? 'allow') === 'deny' ? TOKEN.error : TOKEN.tertiary,
-            whiteSpace: 'nowrap',
-          },
-        }, (state?.subagents ?? 'allow') === 'deny' ? `${t('subagentTitle')}·${t('subagentDeny')}` : t('subagentTitle')),
-        // The web-search switch: same one-click shape, and it shows the
-        // *effective* state even while the level is what decides.
-        h('button', {
-          key: 'search',
-          type: 'button',
-          'aria-pressed': searchNow === 'deny' ? 'true' : 'false',
-          disabled: busy,
-          title: t(searchChoiceNow === 'auto' ? 'searchWhatAuto' : (searchNow === 'deny' ? 'searchWhatDeny' : 'searchWhatAllow')),
-          'data-search': searchNow,
-          'data-search-choice': searchChoiceNow,
-          onClick: () => toggleSearch(),
-          style: {
-            font: 'inherit',
-            fontSize: '12px',
-            lineHeight: '18px',
-            padding: '1px 7px',
-            borderRadius: '999px',
-            cursor: busy ? 'default' : 'pointer',
-            border: `1px solid ${searchNow === 'deny' ? TOKEN.error : TOKEN.border}`,
-            background: 'transparent',
-            color: searchNow === 'deny' ? TOKEN.error : TOKEN.tertiary,
-            whiteSpace: 'nowrap',
-          },
-        }, searchNow === 'deny' ? `${t('searchTitle')}·${t('searchDeny')}` : t('searchTitle')),
+        // The two switches live in the popover now. The header keeps the level
+        // and a single entry point, so the row reads as one decision instead of
+        // seven equally weighted buttons.
         h('button', {
           key: 'help',
           ref: helpButton,
@@ -980,21 +941,27 @@ window.__ModuleLoader__.load({
           title: error ?? (busy ? t('saving') : (summary || t('help'))),
           onClick: () => setOpen((was) => !was),
           style: {
-            border: `1px solid ${open ? TOKEN.brand : TOKEN.border}`,
+            // No resting border: an entry point should not compete with the level
+            // pills for attention. It only gains a surface while open.
+            border: `1px solid ${open ? TOKEN.border : 'transparent'}`,
             background: open ? TOKEN.layer2 : 'transparent',
-            color: open ? TOKEN.brand : TOKEN.secondary,
-            borderRadius: '999px',
-            width: '18px',
-            height: '18px',
-            lineHeight: '16px',
+            color: open ? TOKEN.label : TOKEN.tertiary,
+            borderRadius: '7px',
+            boxSizing: 'border-box',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '28px',
+            height: '26px',
+            lineHeight: 1,
             padding: 0,
             cursor: 'pointer',
             font: 'inherit',
-            fontSize: '12px',
-            fontWeight: 700,
+            fontSize: '16px',
+            fontWeight: 500,
             flexShrink: 0,
           },
-        }, '?'),
+        }, '⋯'),
         error ? h('span', {
           key: 'error',
           style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0 },
@@ -1063,6 +1030,9 @@ window.__ModuleLoader__.load({
       // used to take the whole Settings section down.
       const levels = asLevels(state?.levels)
 
+      // The Settings page uses the same selected treatment as the header row —
+      // a solid brand block — so "what is active" is read the same way in both
+      // places. Focus rings keep it accessible without a second visual style.
       const bigPill = (key, label, active, onClick, title, accent) => h('button', {
         key,
         type: 'button',
@@ -1078,8 +1048,8 @@ window.__ModuleLoader__.load({
           borderRadius: '8px',
           cursor: busy ? 'default' : 'pointer',
           border: `1px solid ${active ? (accent ?? TOKEN.brand) : TOKEN.border}`,
-          background: active ? TOKEN.layer2 : 'transparent',
-          color: active ? (accent ?? TOKEN.brand) : TOKEN.secondary,
+          background: active ? (accent ?? TOKEN.brand) : 'transparent',
+          color: active ? '#fff' : TOKEN.secondary,
           fontWeight: active ? 600 : 400,
         },
       }, label)
