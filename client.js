@@ -177,7 +177,8 @@ window.__ModuleLoader__.load({
 
     /** The host locale service, when this client tree has one. */
     let hostTranslate
-    const builtIn = () => ((typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')) ? DICTIONARIES.zh : DICTIONARIES.en)
+    const isChinese = () => typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')
+    const builtIn = () => (isChinese() ? DICTIONARIES.zh : DICTIONARIES.en)
     const t = (key) => {
       try {
         const value = hostTranslate?.(key)
@@ -185,6 +186,15 @@ window.__ModuleLoader__.load({
       } catch { /* fall back to the built-in dictionary */ }
       return builtIn()[key] ?? key
     }
+
+    /**
+     * Bracket a phrase in the punctuation the language actually uses.
+     *
+     * The two sentences that needed this were written with Chinese full-width
+     * brackets hard-coded, which read as `now: disabled（from the level）` in the
+     * English build.
+     */
+    const paren = (text) => (isChinese() ? `（${text}）` : ` (${text})`)
 
     const LEVEL_LABEL = { off: 'levelOff', light: 'levelLight', standard: 'levelStandard', strong: 'levelStrong' }
     const LEVEL_WHAT = { off: 'levelOffWhat', light: 'levelLightWhat', standard: 'levelStandardWhat', strong: 'levelStrongWhat' }
@@ -694,6 +704,36 @@ window.__ModuleLoader__.load({
         h('span', { key: 'v', style: { color: TOKEN.label } }, value),
       ])
 
+      /**
+       * One selectable pill inside the popover.
+       *
+       * The three groups there (effort, subagents, web search) differ only in
+       * their data and their accent colour, so the styling lives here once
+       * instead of three times. The Settings page keeps its own `bigPill`: it is
+       * a roomier surface and the size difference is deliberate.
+       */
+      const pill = (key, label, { on, title, data, onClick, accent = TOKEN.brand }) => h('button', {
+        key,
+        type: 'button',
+        'aria-pressed': on ? 'true' : 'false',
+        disabled: busy,
+        title,
+        ...data,
+        onClick,
+        style: {
+          font: 'inherit',
+          fontSize: '12px',
+          lineHeight: '18px',
+          padding: '2px 9px',
+          borderRadius: '999px',
+          cursor: busy ? 'default' : 'pointer',
+          border: `1px solid ${on ? accent : TOKEN.border}`,
+          background: on ? TOKEN.layer2 : 'transparent',
+          color: on ? accent : TOKEN.secondary,
+          fontWeight: on ? 600 : 400,
+        },
+      }, label)
+
       const retryButton = (key) => h('button', {
         key,
         type: 'button',
@@ -771,30 +811,16 @@ window.__ModuleLoader__.load({
             role: 'group',
             'aria-label': t('effortTitle'),
             style: { display: 'flex', flexWrap: 'wrap', gap: '4px' },
-          }, EFFORT_CHOICES.map(([value, labelKey, whatKey]) => {
-            const on = (state?.reasoningChoice ?? 'auto') === value
-            return h('button', {
-              key: value,
-              type: 'button',
-              'aria-pressed': on ? 'true' : 'false',
-              disabled: busy,
+          }, EFFORT_CHOICES.map(([value, labelKey, whatKey]) => pill(
+            value,
+            t(labelKey),
+            {
+              on: (state?.reasoningChoice ?? 'auto') === value,
               title: t(whatKey),
-              'data-effort': value,
+              data: { 'data-effort': value },
               onClick: () => chooseEffort(value),
-              style: {
-                font: 'inherit',
-                fontSize: '12px',
-                lineHeight: '18px',
-                padding: '2px 9px',
-                borderRadius: '999px',
-                cursor: busy ? 'default' : 'pointer',
-                border: `1px solid ${on ? TOKEN.brand : TOKEN.border}`,
-                background: on ? TOKEN.layer2 : 'transparent',
-                color: on ? TOKEN.brand : TOKEN.secondary,
-                fontWeight: on ? 600 : 400,
-              },
-            }, t(labelKey))
-          })),
+            },
+          ))),
           h('div', { key: 'now', style: { color: TOKEN.tertiary, marginTop: '4px' } }, `${t('effortCurrent')}: ${effortText}`),
           h('div', { key: 'note', style: { color: TOKEN.tertiary, marginTop: '2px' } }, t('effortReset')),
         ]),
@@ -803,30 +829,17 @@ window.__ModuleLoader__.load({
           style: { marginTop: '10px', paddingTop: '8px', borderTop: `1px solid ${TOKEN.border}` },
         }, [
           h('div', { key: 'h', style: { color: TOKEN.tertiary, marginBottom: '4px' } }, t('subagentTitle')),
-          h('div', { key: 'pills', style: { display: 'flex', gap: '4px' } }, ['allow', 'deny'].map((value) => {
-            const on = (state?.subagents ?? 'allow') === value
-            return h('button', {
-              key: value,
-              type: 'button',
-              'aria-pressed': on ? 'true' : 'false',
-              disabled: busy,
+          h('div', { key: 'pills', style: { display: 'flex', gap: '4px' } }, ['allow', 'deny'].map((value) => pill(
+            value,
+            t(value === 'deny' ? 'subagentDeny' : 'subagentAllow'),
+            {
+              on: (state?.subagents ?? 'allow') === value,
               title: t(value === 'deny' ? 'subagentWhatDeny' : 'subagentWhatAllow'),
-              'data-subagents': value,
+              data: { 'data-subagents': value },
+              accent: value === 'deny' ? TOKEN.error : TOKEN.brand,
               onClick: () => { void post({ subagents: value }, { subagents: value }) },
-              style: {
-                font: 'inherit',
-                fontSize: '12px',
-                lineHeight: '18px',
-                padding: '2px 9px',
-                borderRadius: '999px',
-                cursor: busy ? 'default' : 'pointer',
-                border: `1px solid ${on ? (value === 'deny' ? TOKEN.error : TOKEN.brand) : TOKEN.border}`,
-                background: on ? TOKEN.layer2 : 'transparent',
-                color: on ? (value === 'deny' ? TOKEN.error : TOKEN.brand) : TOKEN.secondary,
-                fontWeight: on ? 600 : 400,
-              },
-            }, t(value === 'deny' ? 'subagentDeny' : 'subagentAllow'))
-          })),
+            },
+          ))),
           h('div', { key: 'note', style: { color: TOKEN.tertiary, marginTop: '4px' } }, t((state?.subagents ?? 'allow') === 'deny' ? 'subagentWhatDeny' : 'subagentWhatAllow')),
         ]),
         h('div', {
@@ -834,33 +847,19 @@ window.__ModuleLoader__.load({
           style: { marginTop: '10px', paddingTop: '8px', borderTop: `1px solid ${TOKEN.border}` },
         }, [
           h('div', { key: 'h', style: { color: TOKEN.tertiary, marginBottom: '4px' } }, t('searchTitle')),
-          h('div', { key: 'pills', style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } }, ['auto', 'allow', 'deny'].map((value) => {
-            const on = searchChoiceNow === value
-            const accent = value === 'deny' ? TOKEN.error : TOKEN.brand
-            return h('button', {
-              key: value,
-              type: 'button',
-              'aria-pressed': on ? 'true' : 'false',
-              disabled: busy,
+          h('div', { key: 'pills', style: { display: 'flex', flexWrap: 'wrap', gap: '4px' }           }, ['auto', 'allow', 'deny'].map((value) => pill(
+            value,
+            t(value === 'auto' ? 'searchAuto' : (value === 'deny' ? 'searchDeny' : 'searchAllow')),
+            {
+              on: searchChoiceNow === value,
               title: t(value === 'auto' ? 'searchWhatAuto' : (value === 'deny' ? 'searchWhatDeny' : 'searchWhatAllow')),
-              'data-search-choice': value,
+              data: { 'data-search-choice': value },
+              accent: value === 'deny' ? TOKEN.error : TOKEN.brand,
               onClick: () => { if (busy) return; void post({ search: value }, { searchChoice: value }) },
-              style: {
-                font: 'inherit',
-                fontSize: '12px',
-                lineHeight: '18px',
-                padding: '2px 9px',
-                borderRadius: '999px',
-                cursor: busy ? 'default' : 'pointer',
-                border: `1px solid ${on ? accent : TOKEN.border}`,
-                background: on ? TOKEN.layer2 : 'transparent',
-                color: on ? accent : TOKEN.secondary,
-                fontWeight: on ? 600 : 400,
-              },
-            }, t(value === 'auto' ? 'searchAuto' : (value === 'deny' ? 'searchDeny' : 'searchAllow')))
-          })),
+            },
+          ))),
           h('div', { key: 'now', style: { color: TOKEN.tertiary, marginTop: '4px' } },
-            `${t('searchCurrent')}: ${searchText}（${t(searchChoiceNow === 'auto' ? 'searchFromLevel' : 'searchByYou')}）`),
+            `${t('searchCurrent')}: ${searchText}${paren(t(searchChoiceNow === 'auto' ? 'searchFromLevel' : 'searchByYou'))}`),
           h('div', { key: 'note', style: { color: TOKEN.tertiary, marginTop: '2px' } }, t(searchChoiceNow === 'auto' ? 'searchWhatAuto' : (searchNow === 'deny' ? 'searchWhatDeny' : 'searchWhatAllow'))),
         ]),
         h('div', {
@@ -1124,7 +1123,7 @@ window.__ModuleLoader__.load({
             bigPill('deny', t('searchDeny'), searchChoiceNow === 'deny', () => chooseSearch('deny'), t('searchWhatDeny'), TOKEN.error),
           ]),
           h('div', { key: 'now', style: { color: TOKEN.tertiary, marginTop: '6px' } },
-            `${t('searchCurrent')}: ${searchText}（${t(searchChoiceNow === 'auto' ? 'searchFromLevel' : 'searchByYou')}）`),
+            `${t('searchCurrent')}: ${searchText}${paren(t(searchChoiceNow === 'auto' ? 'searchFromLevel' : 'searchByYou'))}`),
           h('div', { key: 'note', style: { color: TOKEN.tertiary, marginTop: '2px' } }, t(searchChoiceNow === 'auto' ? 'searchWhatAuto' : (searchNow === 'deny' ? 'searchWhatDeny' : 'searchWhatAllow'))),
         ]),
 

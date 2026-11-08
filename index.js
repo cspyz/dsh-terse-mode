@@ -14,7 +14,7 @@
  * failing collaborator degrades this plugin, it must never fail activation or
  * an agent's creation (see docs/superpowers/specs/2026-10-01-terse-mode-design.md).
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   LEVELS,
@@ -72,17 +72,31 @@ export function apply(ctx, config) {
   const remembered = store.read()
   const authored = rawOf(config)
 
-  /** Append one bounded line to a diagnostics file next to the state file. */
+  /**
+   * Append one bounded line to a diagnostics file next to the state file.
+   *
+   * Appends instead of read-modify-writing: the first version read the whole
+   * file and rewrote it for every line, and the panel writes one line per
+   * request (up to eight when its retries run), so one click could copy 64KB a
+   * few times on the event loop. The size is remembered in memory and read from
+   * disk once per process; the file is rewritten only when it overflows.
+   */
+  const logSizes = new Map()
   const appendLine = (name, line) => {
     try {
       const file = join(dirname(store.path), name)
-      const stamp = new Date().toISOString()
-      let previous = ''
-      try {
-        previous = readFileSync(file, 'utf8')
-        if (previous.length > 64 * 1024) previous = ''
-      } catch { /* first write */ }
-      writeFileSync(file, `${previous}${stamp} ${line}\n`)
+      const text = `${new Date().toISOString()} ${line}\n`
+      let size = logSizes.get(file)
+      if (size === undefined) {
+        try { size = statSync(file).size } catch { size = 0 }
+      }
+      if (size + text.length > 64 * 1024) {
+        writeFileSync(file, text)
+        logSizes.set(file, text.length)
+        return
+      }
+      appendFileSync(file, text)
+      logSizes.set(file, size + text.length)
     } catch { /* diagnostics must never break the host */ }
   }
 
