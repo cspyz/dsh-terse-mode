@@ -64,7 +64,11 @@ export const Config = {
 }
 
 export function apply(ctx, config) {
-  const store = createLevelStore(ctx)
+  // `store` has to exist before `log` (it names the diagnostics directory) and
+  // `log` has to exist before `store` can report a failed write. The indirection
+  // breaks the cycle, so a choice that cannot be persisted is never silent.
+  let mirror = () => {}
+  const store = createLevelStore(ctx, (level, text) => mirror(level, text))
   const remembered = store.read()
   const authored = rawOf(config)
 
@@ -89,6 +93,7 @@ export function apply(ctx, config) {
    * cannot connect there is no other way to read *why* a registration failed.
    */
   const log = makeLogger(ctx, (level, text) => appendLine('plugin.log', `${level} ${text}`))
+  mirror = log
 
   /**
    * One line per panel request, next to the state file. When the widget shows
@@ -98,35 +103,47 @@ export function apply(ctx, config) {
   const debugLog = (line) => appendLine('requests.log', line)
 
   /**
-   * Merge a remembered panel choice over the authored config.
+   * The panel's layer, kept apart from the authored config.
    *
-   * An `auto` choice must *remove* an authored value (so the level default
-   * applies again), which is why this is not a plain spread.
+   * Two layers instead of one merge is what makes "a level click resets the
+   * effort and the search knob" safe. The click clears the *panel's* pin, and
+   * whatever `cordis.patch.yml` authored comes back. The old single-layer merge
+   * called `delete` on the merged object, so a patch-level `search: deny` was
+   * gone for good after one level click — it also wrote `auto` back to
+   * `level.json`, which then beat the patch on every later start.
+   *
+   * `auto` is stored as "no pin", never as the string `auto`, so the layers
+   * combine with a plain spread: `{ ...authored, ...pinned }`.
    */
-  const withRemembered = (base, choice) => {
-    const next = { ...base }
-    if (choice === undefined) return next
-    if (LEVELS.includes(choice.level)) next.level = choice.level
-    if (choice.reasoningEffort === 'auto') delete next.reasoningEffort
-    else if (REASONING_CHOICES.includes(choice.reasoningEffort)) next.reasoningEffort = choice.reasoningEffort
-    if (choice.search === 'auto') delete next.search
-    else if (SEARCH_CHOICES.includes(choice.search)) next.search = choice.search
-    if (SUBAGENT_CHOICES.includes(choice.subagents)) next.subagents = choice.subagents
-    return next
+  const pinnedFrom = (choice) => {
+    const pinned = {}
+    if (choice === undefined) return pinned
+    if (LEVELS.includes(choice.level)) pinned.level = choice.level
+    if (choice.reasoningEffort !== 'auto' && REASONING_CHOICES.includes(choice.reasoningEffort)) {
+      pinned.reasoningEffort = choice.reasoningEffort
+    }
+    if (choice.search !== 'auto' && SEARCH_CHOICES.includes(choice.search)) pinned.search = choice.search
+    if (SUBAGENT_CHOICES.includes(choice.subagents)) pinned.subagents = choice.subagents
+    return pinned
   }
 
   const runtime = {
-    /** The authored config, kept clean so a choice change can re-normalise. */
-    raw: withRemembered(authored, remembered),
+    /** The authored config, never mutated: the floor the panel builds on. */
+    authored,
+    /** What the panel chose, and all that is persisted. */
+    pinned: pinnedFrom(remembered),
+    /** `authored` with `pinned` on top; what `normalizeConfig` consumes. */
+    raw: {},
     /** The live policy. Everything reads this, never a captured copy. */
-    policy: normalizeConfig(config),
+    policy: undefined,
     sectionDispose: undefined,
     sectionTimer: undefined,
     restrictions: new Set(),
   }
+  runtime.raw = { ...runtime.authored, ...runtime.pinned }
   runtime.policy = normalizeConfig(runtime.raw)
-  if (remembered !== undefined) {
-    log('info', `using the choice remembered from the panel: level=${runtime.raw.level ?? '(authored)'} reasoningEffort=${runtime.raw.reasoningEffort ?? 'auto'}`)
+  if (Object.keys(runtime.pinned).length > 0) {
+    log('info', `using the choice remembered from the panel: ${Object.entries(runtime.pinned).map(([k, v]) => `${k}=${v}`).join(' ')}`)
   }
 
   log('info', `active: ${describePolicy(runtime.policy)}`)
@@ -262,21 +279,25 @@ export function apply(ctx, config) {
    * @returns the effective policy, or `undefined` when a value is unknown.
    */
   const update = (patch) => {
-    const next = { ...runtime.raw, ...patch }
-    // An `auto` choice means "follow the level again", i.e. the field must leave
-    // the authored subset rather than be stored as a value.
+    // Only the panel's layer moves here. `authored` is never touched, so a value
+    // written in `cordis.patch.yml` comes back the moment its pin is cleared.
+    const next = { ...runtime.pinned }
+    if (LEVELS.includes(patch.level)) next.level = patch.level
     for (const field of ['reasoningEffort', 'search']) {
       if (patch[field] === 'auto') delete next[field]
+      else if (patch[field] !== undefined) next[field] = patch[field]
     }
-    runtime.raw = next
-    runtime.policy = normalizeConfig(next)
+    if (SUBAGENT_CHOICES.includes(patch.subagents)) next.subagents = patch.subagents
+    runtime.pinned = next
+    runtime.raw = { ...runtime.authored, ...next }
+    runtime.policy = normalizeConfig(runtime.raw)
     store.write({
-      // `raw.level` is undefined when the row omitted `level`. Writing that
+      // `next.level` is undefined when the panel never picked one. Writing that
       // drops the key from the JSON, and `store.read()` refuses a file without
       // it — the panel's choice then looked applied but was gone on restart.
-      level: runtime.raw.level ?? runtime.policy.level,
-      reasoningEffort: runtime.raw.reasoningEffort ?? 'auto',
-      search: runtime.raw.search ?? 'auto',
+      level: next.level ?? runtime.policy.level,
+      reasoningEffort: next.reasoningEffort ?? 'auto',
+      search: next.search ?? 'auto',
       subagents: runtime.policy.subagents,
     })
     log('info', `updated: ${describePolicy(runtime.policy)}`)
@@ -302,12 +323,35 @@ export function apply(ctx, config) {
   /** Allow or forbid spawning subagents: allow | deny. */
   const setSubagents = (value) => (SUBAGENT_CHOICES.includes(value) ? update({ subagents: value }) : undefined)
 
+  /**
+   * Adopt a choice another host wrote.
+   *
+   * The desktop app and `dsh web` use different profiles but share `level.json`,
+   * so without this a change made in one is only picked up by the other after a
+   * restart. `samePin` is what stops our own writes from rebuilding everything.
+   */
+  const refreshFromStore = () => {
+    const pinned = pinnedFrom(store.read())
+    if (samePin(pinned, runtime.pinned)) return
+    runtime.pinned = pinned
+    runtime.raw = { ...runtime.authored, ...pinned }
+    runtime.policy = normalizeConfig(runtime.raw)
+    log('info', `adopted the choice written by another host: ${describePolicy(runtime.policy)}`)
+    syncInstruction()
+    syncRestrictions()
+  }
+
+  // Declared before the unload effect so it can be released there; assigned
+  // further down, once every function the callback needs exists.
+  let stopWatching
+
   // Unload disposes the live pieces this file owns directly; the `ctx.effect`
   // and `ctx.on` registrations release themselves.
   try {
     ctx.effect(() => () => {
       if (runtime.sectionTimer !== undefined) clearTimeout(runtime.sectionTimer)
       runtime.sectionTimer = undefined
+      stopWatching?.()
       dispose(runtime.sectionDispose)
       disposeRestrictions()
     }, `${PLUGIN_NAME}.runtime()`)
@@ -317,6 +361,22 @@ export function apply(ctx, config) {
 
   syncInstruction()
   syncRestrictions()
+
+  // Follow the shared state file so a change made in the other host (desktop vs
+  // `dsh web`) takes effect without a restart. Best effort: a profile whose
+  // storage directory cannot be watched simply keeps the start-time choice.
+  try {
+    stopWatching = store.watch?.(() => {
+      try {
+        refreshFromStore()
+      } catch (error) {
+        log('warn', `could not adopt the shared choice: ${message(error)}`)
+      }
+    })
+    if (stopWatching === undefined) log('info', `not watching ${store.path}; the panel choice is read at start-up only`)
+  } catch (error) {
+    log('warn', `could not watch ${store.path}: ${message(error)}`)
+  }
 
   // Hand the controller to the conversation-page widget over the host web
   // server; a profile without one just logs and keeps working.
@@ -460,6 +520,19 @@ function liveAgents(ctx) {
   } catch {
     return undefined
   }
+}
+
+/** The four fields the panel owns; the rest of the config belongs to the patch. */
+const PIN_FIELDS = ['level', 'reasoningEffort', 'search', 'subagents']
+
+/**
+ * True when two pin objects say the same thing, field by field.
+ *
+ * Per-field rather than a JSON string: the key order of `level.json` is not
+ * something to depend on, and a missing field must equal a missing field.
+ */
+function samePin(a, b) {
+  return PIN_FIELDS.every((field) => a?.[field] === b?.[field])
 }
 
 function dispose(disposer) {

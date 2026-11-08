@@ -119,7 +119,8 @@ node tools/install-terse-mode.mjs --profile web      # 网页端（dsh web 用�
 ```
 
 `--profile <名字>` 对应 `$DSH_HOME/profiles/<名字>`；`--status` 看当前状态，`--uninstall` 撤销（都要带同一个 `--profile`）。
-两端共用同一个记忆文件 `$DSH_HOME/storages/dsh-terse-mode/level.json`，所以档位/强度/子代理选择是共享的。
+两端共用同一个记忆文件 `$DSH_HOME/storages/dsh-terse-mode/level.json`，所以档位/强度/子代理选择是共享的 —— 并且是**运行时就同步**的：
+插件监听这个文件，一端改了，另一端 150ms 内跟上，不用重启。
 
 改档位有两种办法，任选：
 
@@ -153,9 +154,12 @@ node tools/install-terse-mode.mjs --profile web      # 网页端（dsh web 用�
     `$DSH_HOME/storages/dsh-terse-mode/level.json`，优先于 patch，删掉即回到 patch；点档位/改配置立即生效，改代码要重启。
 - `⋯` 的 hover 提示会写出「思考 / 上限 / 联网 / 子代理」四项的当前生效值 —— 顶行不显示开关状态，这是不打开面板也能核对的地方。
 - 弹层用 `position: fixed` 挂在按钮下方：顶部那一行不归插件管，绝对定位的盒子可能被裁掉。
-- 选择会记住（存到 `$DSH_HOME/storages/dsh-terse-mode/level.json`）。**面板的选择优先于 patch 里的 `level`**；
-  想回到 patch 的档位，删掉那个文件即可。
+- 选择会记住（存到 `$DSH_HOME/storages/dsh-terse-mode/level.json`）。**面板选的优先于 patch**，
+  但两层是分开记的：点档位只清掉**面板自己的**那两项，patch 里写死的 `reasoningEffort` / `search` 会立刻回来，
+  不会被一次点击永久抹掉。想连 patch 的值一起回到默认，改 patch 或删掉那个文件。
 - 面板没连上宿主时按钮右边会显示红字「未连上宿主」（通常是插件刚更新，还需要重启一次 DSH）。
+- 写不进 `level.json` 时（只读目录、磁盘满）选项目前仍然生效，但日志里会留一条 warning：
+  `plugin.log` 与 `dsh-terse-mode` 的 logger 都能看到，重启会丢。
 
 面板与宿主之间走的是 DSH 自己的 HTTP 路由：`GET/POST /dsh-terse-mode/api/state`（仅回环，
 和插件市场 `/dsh-market/*` 同一个通道）。手工核对：

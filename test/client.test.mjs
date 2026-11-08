@@ -218,9 +218,12 @@ describe('the client half renders', () => {
     // A page that renders nothing is the failure this suite exists for: the
     // Settings section once registered its nav label and drew an empty body.
     // The header is deliberately terse (its long copy lives in the popover), so
-    // each view is checked against what it is supposed to contain.
+    // each view is checked against what it is supposed to contain. The header
+    // now carries the level row and a single entry point; the web-search and
+    // subagent switches moved inside that popover, so their labels appear in the
+    // Settings view only.
     const expected = {
-      'conversation.session.header.actions': ['简洁模式', '子代理', '联网', '关', '轻', '标准', '强'],
+      'conversation.session.header.actions': ['简洁模式', '关', '轻', '标准', '强'],
       'settings.section': ['简洁模式', '每一档在做什么', '思考强度', '联网搜索', '子代理', '跟随档位', '允许', '禁止'],
     }
     for (const { slot, component } of registered) {

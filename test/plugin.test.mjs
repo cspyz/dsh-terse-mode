@@ -7,10 +7,10 @@
  * make `apply` or an `agent/created` listener throw.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { beforeEach, describe, it } from 'node:test'
+import { dirname, join } from 'node:path'
+import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import { apply, Config } from '../index.js'
 
@@ -197,6 +197,14 @@ describe('apply()', () => {
 
   beforeEach(() => {
     harness = fakeContext()
+  })
+
+  // Every apply() now owns an fs.watch handle. Releasing them after each test
+  // keeps ~20 of them from piling up, which is enough to starve the last test's
+  // watcher on Windows. One test releases on purpose; a second release is a
+  // no-op because the effect list is already empty.
+  afterEach(() => {
+    harness.ctx.releaseAll()
   })
 
   it('adds one last prompt section and applies the web policy', async () => {
@@ -412,5 +420,104 @@ describe('apply()', () => {
     const section = harness.state.sections[0]
     assert.equal(section.text.split('Web search and web fetch are turned off').length - 1, 1)
     assert.equal(harness.state.logs.filter(([level]) => level === 'warn').length, 0)
+  })
+})
+
+/**
+ * The state file is shared by two hosts, and the panel's layer must never erase
+ * what `cordis.patch.yml` authored. Neither is visible from `normalizeConfig`
+ * alone, so they are driven through the real route and the real file here.
+ */
+describe('the panel layer and the shared state file', () => {
+  /** Present a request the way the browser does and collect the JSON answer. */
+  function callRoute(route, method, body) {
+    return new Promise((resolve, reject) => {
+      const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
+      const request = {
+        method,
+        url: route.path,
+        headers: { host: '127.0.0.1:19387', 'content-type': 'application/json' },
+        async *[Symbol.asyncIterator]() {
+          for (const chunk of chunks) yield chunk
+        },
+      }
+      const response = {
+        statusCode: 0,
+        writeHead(status) { this.statusCode = status; return this },
+        end(text) {
+          try { resolve({ status: this.statusCode, body: JSON.parse(text || '{}') }) } catch (error) { reject(error) }
+        },
+      }
+      Promise.resolve(route.handler(request, response)).catch(reject)
+    })
+  }
+
+  /** Run `apply` against its own DSH_HOME, and restore the previous one. */
+  async function withHome(run) {
+    const previous = process.env.DSH_HOME
+    const home = mkdtempSync(join(tmpdir(), 'terse-mode-home-'))
+    process.env.DSH_HOME = home
+    try {
+      await run(home)
+    } finally {
+      process.env.DSH_HOME = previous
+    }
+  }
+
+  it('keeps the authored search setting when a level is clicked', async () => {
+    // The old single-layer merge deleted `search` from the merged object, so one
+    // click on "light" silently turned `search: deny` into "allowed" and wrote
+    // `auto` back to level.json, where it beat the patch forever.
+    await withHome(async () => {
+      const ctx = fakeContext()
+      apply(ctx.ctx, Config['~standard'].validate({ level: 'standard', search: 'deny', reasoningEffort: 'high' }).value)
+      const route = ctx.state.routes[0]
+
+      const answer = await callRoute(route, 'POST', { level: 'light' })
+      assert.equal(answer.status, 200)
+      assert.equal(answer.body.level, 'light')
+      assert.equal(answer.body.effective.search, 'deny', 'the patch still denies search')
+      assert.equal(answer.body.effective.reasoningEffort, 'high', 'the patch still pins the effort')
+      ctx.ctx.releaseAll()
+    })
+  })
+
+  it('reports a choice it could not persist', async () => {
+    // A directory where the file belongs makes the rename fail on every platform.
+    await withHome(async (home) => {
+      const file = join(home, 'storages', 'dsh-terse-mode', 'level.json')
+      mkdirSync(join(file, 'blocker'), { recursive: true })
+
+      const ctx = fakeContext()
+      apply(ctx.ctx, { level: 'standard' })
+      const answer = await callRoute(ctx.state.routes[0], 'POST', { level: 'strong' })
+
+      assert.equal(answer.status, 200, 'the choice still applies for this session')
+      assert.ok(
+        ctx.state.logs.some(([level, , text]) => level === 'warn' && /could not remember the choice/.test(text)),
+        'a write failure must reach the log, not vanish',
+      )
+      ctx.ctx.releaseAll()
+    })
+  })
+
+  it('adopts a choice written by the other host without a restart', async () => {
+    await withHome(async (home) => {
+      const ctx = fakeContext()
+      apply(ctx.ctx, { level: 'standard' })
+      assert.match(ctx.state.sections[0].text, /Web search and web fetch are turned off/)
+
+      const file = join(home, 'storages', 'dsh-terse-mode', 'level.json')
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ level: 'light', reasoningEffort: 'auto', search: 'auto', subagents: 'allow' }))
+
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline && /Web search and web fetch are turned off/.test(ctx.state.sections[0]?.text ?? '')) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      assert.doesNotMatch(ctx.state.sections[0].text, /Web search and web fetch are turned off/, `light allows search again ${JSON.stringify(ctx.state.logs)}`)
+      assert.ok(ctx.state.logs.some(([, , text]) => /another host/.test(text)))
+      ctx.ctx.releaseAll()
+    })
   })
 })
