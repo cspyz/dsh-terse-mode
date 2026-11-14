@@ -44,7 +44,7 @@ window.__ModuleLoader__.load({
         levelLightWhat: '轻：思考默认压到 low；联网默认允许；回答长度不限；只加一条“简短回答、别过度搜”的指令。',
         levelStandardWhat: '标准（推荐）：思考默认压到 low；联网默认禁止（工具也从模型眼前藏掉）；回答长度不限，只靠指令要求简短。',
         levelStrongWhat: '强：思考默认关掉；联网默认禁止；最严格的简短要求（回答尽量 120 字内）；回答长度同样不限。',
-        levelDefaultsNote: '档位给的是默认值：下面的开关只要不是「跟随档位」，就以开关为准（思考强度、联网搜索）；子代理开关则完全独立于档位。',
+        levelDefaultsNote: '档位只提供默认值：手动改过的项会一直保留，换档位也不会清掉；右侧标记说明这一项由谁决定。',
         whatTitle: '每一档在做什么',
         effortTitle: '思考强度（覆盖档位）',
         // Labels follow the official model menu's effort names, in English, in

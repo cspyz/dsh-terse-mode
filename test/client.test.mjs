@@ -262,7 +262,7 @@ describe('the client half renders', () => {
     // Settings view only.
     const expected = {
       'conversation.session.header.actions': ['简洁模式', '关', '轻', '标准', '强'],
-      'settings.section': ['简洁模式', '每一档在做什么', '思考强度', '联网搜索', '子代理', '跟随档位', '允许', '禁止'],
+      'settings.section': ['简洁模式', '每一档在做什么', '思考强度', '联网搜索', '子代理', '推荐', '允许', '禁止', '当前实际生效'],
     }
     for (const { slot, component } of registered) {
       const text = render(component({})).join(' ')
