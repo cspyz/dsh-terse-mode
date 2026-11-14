@@ -18,14 +18,22 @@ const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
 
 /** Just enough React to walk a tree: hooks are inert, effects run once. */
-function reactStub() {
+function reactStub(force = {}) {
   const createElement = (type, props, ...children) => ({
     type,
     props: { ...(props ?? {}), children: children.length > 1 ? children : children[0] },
   })
+  // `force.open` makes the popover mount and `force.anchor` gives it the rect it
+  // would measure from a real button, so the popover's own children can be
+  // walked (its keys are where the duplicate that broke the UI lived).
+  const useState = (initial) => {
+    if (initial === false && force.open) return [true, () => {}]
+    if (initial === null && force.anchor) return [{ top: 120, right: 16 }, () => {}]
+    return [initial, () => {}]
+  }
   return {
     createElement,
-    useState: (initial) => [initial, () => {}],
+    useState,
     useReducer: (initial) => [initial, () => {}],
     // Effects run when the component renders, which is what starts the store's
     // read; re-rendering the component afterwards shows that state.
@@ -50,7 +58,7 @@ function loadClient(overrides = {}) {
       load(definition) {
         assert.equal(definition.id, 'dsh-terse-mode')
         const module = definition.factory((name) => {
-          if (name === 'react') return reactStub()
+          if (name === 'react') return reactStub(overrides.react)
           throw new Error(`unexpected require(${name})`)
         })
         slots.push(module)
@@ -159,6 +167,36 @@ function findBy(tree, predicate) {
   }
   if (predicate(tree)) return tree
   return findBy(tree.props?.children, predicate)
+}
+
+/**
+ * Walk a rendered tree and fail on two siblings sharing a key.
+ *
+ * Duplicate keys make React's reconciliation undefined, and inside a portal the
+ * orphaned copies are never removed — a level bar that shared its key with a
+ * sibling Collapse multiplied on every render until the popover was a column of
+ * them. Function components are expanded the same way `render` does it.
+ */
+function assertUniqueKeys(element, where = 'root', depth = 0) {
+  if (element === null || element === undefined || typeof element !== 'object') return
+  assert.ok(depth < 40, 'key walk ran away')
+  if (Array.isArray(element)) {
+    const seen = new Set()
+    for (const child of element) {
+      const key = child?.props?.key
+      if (key !== undefined && key !== null) {
+        assert.equal(seen.has(key), false, `${where} has two children keyed ${String(key)}`)
+        seen.add(key)
+      }
+      assertUniqueKeys(child, where, depth + 1)
+    }
+    return
+  }
+  if (typeof element.type === 'function') {
+    assertUniqueKeys(element.type(element.props ?? {}), where, depth + 1)
+    return
+  }
+  assertUniqueKeys(element.props?.children, where, depth + 1)
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -299,5 +337,195 @@ describe('the client half renders', () => {
     const offAfter = findBy(after, (node) => node?.props?.['data-level'] === 'off')
     assert.equal(strongAfter.props['aria-pressed'], 'true', 'the click wins')
     assert.equal(offAfter.props['aria-pressed'], 'false', 'the stale read was dropped')
+  })
+
+  it('shows a pressed pill for the none reasoning choice (F7)', async () => {
+    // 'none' is a valid host choice; without a pill the user could not see it was
+    // active, and the readout fell back to "follows the model menu".
+    const { registered } = loadClient({
+      fetch: async () => ({ ok: true, status: 200, text: async () => stateOf('standard', { reasoningChoice: 'none', effective: { reasoningEffort: null, reasoningMode: 'cap', maxTokens: null, search: 'deny', instruction: true } }) }),
+    })
+    const settings = registered.find((entry) => entry.slot === 'settings.section').component
+    render(settings({})); await tick()
+    const nonePill = findBy(settings({}), (node) => node?.type === 'button' && node?.props?.children === 'none')
+    assert.ok(nonePill, 'the none effort pill exists')
+    assert.equal(nonePill.props['aria-pressed'], 'true', 'none is highlighted when chosen')
+  })
+
+  it('does not report offline when a successful read lacks effective (F6)', async () => {
+    // A partial state (no effective) used to render the offline branch even though
+    // the read succeeded, and searchState guessed 'deny' against the level default.
+    const { registered } = loadClient({
+      fetch: async () => ({ ok: true, status: 200, text: async () => stateOf('light', { effective: undefined }) }),
+    })
+    const settings = registered.find((entry) => entry.slot === 'settings.section').component
+    render(settings({})); await tick()
+    const text = render(settings({})).join(' ')
+    assert.ok(text.includes('暂无生效数据'), 'shows the neutral unknown placeholder')
+    assert.ok(!text.includes('未连上宿主'), 'a successful read must not look offline')
+  })
+
+  it('rejects a 200 whose body is not a state, surfacing the error (F11)', async () => {
+    // A forwarder can answer 200 with {"error":...}; accepting it cleared the error
+    // and stopped the retry loop, so the header looked normal with no real data.
+    const { registered } = loadClient({
+      fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ error: 'not found' }) }),
+    })
+    const header = registered.find((entry) => entry.slot === 'conversation.session.header.actions').component
+    render(header({})); await tick(); await tick()
+    const text = render(header({})).join(' ')
+    assert.ok(text.includes('未连上宿主'), 'a garbage 200 must surface as an error, not a silent success')
+  })
+
+  it('marks the values the config file pinned (sources.patch)', async () => {
+    // Without this tag a pinned value renders identically to one the user just
+    // clicked, so "follow the level" appears to do nothing.
+    const { registered } = loadClient({
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => stateOf('standard', { sources: { level: 'panel', search: 'patch', reasoningEffort: 'level', subagents: 'level' } }),
+      }),
+    })
+    const settings = registered.find((entry) => entry.slot === 'settings.section').component
+    render(settings({}))
+    await tick()
+    const text = render(settings({})).join(' ')
+    assert.ok(text.includes('配置文件固定'), 'the pinned search switch carries the tag')
+
+    // No "follow the level" link: clearing the pin would only let the patch value
+    // straight back in, so offering it would be a dead button.
+    const follow = findBy(settings({}), (node) => node?.type === 'button' && node?.props?.children === '改为跟随档位')
+    assert.equal(follow, undefined, 'the link is not offered for a config-pinned value')
+  })
+
+  it('moves the switches when the level changes', async () => {
+    // A level click has to move the block: 标准 → 联网「禁止」, 轻 → 「允许」.
+    // Showing "跟随档位" instead left the user unable to see what the level did.
+    const stateFor = (level) => JSON.stringify({
+      level,
+      levels: ['off', 'light', 'standard', 'strong'],
+      reasoningChoice: 'auto',
+      searchChoice: 'auto',
+      subagents: 'allow',
+      sources: { level: 'panel', search: 'level', reasoningEffort: 'level', subagents: 'level' },
+      effective: {
+        reasoningEffort: level === 'strong' ? 'off' : 'low',
+        reasoningMode: 'cap',
+        maxTokens: null,
+        search: level === 'standard' || level === 'strong' ? 'deny' : 'allow',
+        instruction: true,
+      },
+      health: { instruction: true, expected: true, sessions: 1 },
+    })
+    const { registered } = loadClient({
+      fetch: async (url, init) => {
+        const asked = init?.body ? JSON.parse(init.body).level : undefined
+        return { ok: true, status: 200, text: async () => stateFor(asked ?? 'standard') }
+      },
+    })
+    const settings = registered.find((entry) => entry.slot === 'settings.section').component
+    render(settings({}))
+    await tick()
+
+    const pressed = (value) => findBy(settings({}), (node) => node?.props?.['data-search-choice'] === value)?.props?.['aria-pressed']
+    assert.equal(pressed('deny'), 'true', 'standard denies search')
+    assert.equal(pressed('allow'), 'false')
+
+    const light = findBy(settings({}), (node) => node?.props?.['data-level'] === 'light')
+    assert.ok(light, 'the level card is there to click')
+    light.props.onClick()
+    await tick()
+
+    assert.equal(pressed('allow'), 'true', 'the switch jumped to the value light gives')
+    assert.equal(pressed('deny'), 'false', 'and the old value is no longer shown')
+  })
+
+  it('never renders two siblings with the same key, popover included', async () => {
+    const { registered } = loadClient({
+      // Mount the popover: its children are where the colliding key lived, and a
+      // closed popover would hide the regression completely.
+      react: { open: true, anchor: true },
+      fetch: async () => ({ ok: true, status: 200, text: async () => stateOf('off', { sources: { search: 'patch', level: 'panel' } }) }),
+    })
+    render(registered.find((entry) => entry.slot === 'conversation.session.header.actions').component({}))
+    await tick()
+    for (const { slot, component } of registered) {
+      assertUniqueKeys(component({}), slot)
+    }
+    const header = registered.find((entry) => entry.slot === 'conversation.session.header.actions').component
+    const text = render(header({})).join(' ')
+    assert.ok(text.includes('每一档在做什么'), 'the popover really rendered')
+  })
+
+  it('the key checker itself rejects duplicates', () => {
+    // A control for the test above: without this, a broken walker would happily
+    // pass on a tree that has the very bug it exists to catch.
+    const duplicate = {
+      type: 'div',
+      props: { children: [{ type: 'span', props: { key: 'levels' } }, { type: 'span', props: { key: 'levels' } }] },
+    }
+    assert.throws(() => assertUniqueKeys(duplicate), /two children keyed levels/)
+  })
+
+  it('does not report a missing instruction as a failure at the off level', async () => {
+    // `level: off` deliberately registers no prompt section; that is not a fault.
+    const { registered } = loadClient({
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => stateOf('off', {
+          effective: { reasoningEffort: null, reasoningMode: 'cap', maxTokens: null, search: 'allow', instruction: false },
+          health: { instruction: false, expected: false, sessions: 0 },
+        }),
+      }),
+    })
+    const settings = registered.find((entry) => entry.slot === 'settings.section').component
+    render(settings({}))
+    await tick()
+    const text = render(settings({})).join(' ')
+    assert.ok(text.includes('按当前档位不使用提示词'), 'explained as intentional')
+    assert.equal(text.includes('提示词未生效'), false, 'not reported as a failure')
+  })
+
+  it('follows the option lists the host sends', async () => {
+    // The client used to hard-code the six effort ids and the two/three switch
+    // values, which is how `none` once existed on the host and not in the panel.
+    const { registered } = loadClient({
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => stateOf('standard', {
+          reasoningChoices: ['auto', 'low', 'turbo'],
+          searchChoices: ['auto', 'deny'],
+          subagentChoices: ['allow'],
+        }),
+      }),
+    })
+    const settings = registered.find((entry) => entry.slot === 'settings.section').component
+    render(settings({}))
+    await tick()
+    const tree = settings({})
+    assert.ok(findBy(tree, (node) => node?.props?.['data-effort'] === 'turbo'), 'an unknown host id still renders')
+    assert.equal(findBy(tree, (node) => node?.props?.['data-effort'] === 'high'), undefined, 'a dropped id is gone')
+    assert.equal(findBy(tree, (node) => node?.props?.['data-search-choice'] === 'allow'), undefined, 'the switch follows the host list')
+  })
+})
+
+describe('the built-in dictionaries', () => {
+  it('every key the UI translates exists in both zh and en', () => {
+    // The advanced editor once rendered raw key names ("instrAuto", "toggleOn")
+    // in Chinese because six keys existed only in `en`. A key the UI calls via
+    // t() must exist in BOTH built-in dictionaries, or `t` falls back to the key.
+    const dictStart = source.indexOf('const DICTIONARIES')
+    const zhStart = source.indexOf('zh: {', dictStart)
+    const enStart = source.indexOf('en: {', zhStart)
+    const dictEnd = source.indexOf('\n    }', enStart)
+    const keysOf = (block) => new Set([...block.matchAll(/^ {8}(\w+):/gm)].map((m) => m[1]))
+    const zh = keysOf(source.slice(zhStart, enStart))
+    const en = keysOf(source.slice(enStart, dictEnd))
+    const used = [...new Set([...source.matchAll(/\bt\(['"](\w+)['"]\)/g)].map((m) => m[1]))]
+    const missing = used.filter((key) => !zh.has(key) || !en.has(key))
+    assert.deepEqual(missing, [], `t() keys missing from a dictionary: ${missing.join(', ')}`)
   })
 })

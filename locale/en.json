@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Terse mode (dsh-terse-mode)",
-    "description": "Keep the agent terse: four levels (off/light/standard/strong) plus independent switches for reasoning effort, web search and subagents. No output ceiling."
+    "description": "Four terse levels in the conversation header — less thinking, no web search, shorter answers — plus independent switches for reasoning effort, web search and subagents, mirrored in Settings. Changes apply immediately."
   }
 }

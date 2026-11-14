@@ -138,6 +138,14 @@ export function apply(ctx, config) {
     }
     if (choice.search !== 'auto' && SEARCH_CHOICES.includes(choice.search)) pinned.search = choice.search
     if (SUBAGENT_CHOICES.includes(choice.subagents)) pinned.subagents = choice.subagents
+    // Advanced knobs: only a value the file actually carries becomes a pin, so a
+    // patch-level setting survives until the panel changes it.
+    if (Number.isInteger(choice.maxTokens)) pinned.maxTokens = choice.maxTokens
+    if (typeof choice.instruction === 'string' && choice.instruction !== 'auto') pinned.instruction = choice.instruction
+    if (typeof choice.applyToAllModels === 'boolean') pinned.applyToAllModels = choice.applyToAllModels
+    if (Array.isArray(choice.subagentTools) && choice.subagentTools.length > 0) {
+      pinned.subagentTools = [...choice.subagentTools]
+    }
     return pinned
   }
 
@@ -153,6 +161,11 @@ export function apply(ctx, config) {
     sectionDispose: undefined,
     sectionTimer: undefined,
     restrictions: new Set(),
+    /** Tool names this host refused to hide, i.e. names it does not mount. */
+    unknownTools: new Set(),
+    /** What was applied last, so an unchanged policy does not rebuild it. */
+    appliedDeny: undefined,
+    appliedInstruction: undefined,
   }
   runtime.raw = { ...runtime.authored, ...runtime.pinned }
   runtime.policy = normalizeConfig(runtime.raw)
@@ -170,20 +183,30 @@ export function apply(ctx, config) {
   // "be terse" feature — used to give up and stay silent. Same shape here.
   const SECTION_RETRY_DELAYS = [250, 1000, 3000]
   const syncInstruction = (attempt = 0) => {
+    const text = runtime.policy.instruction
+    // A change that leaves the words alone (a level click that only moves the
+    // effort, a search toggle on the same level) must not tear the section down
+    // and then race the previous generation for the same section name.
+    if (attempt === 0 && runtime.sectionDispose !== undefined && runtime.appliedInstruction === text) return
     if (runtime.sectionTimer !== undefined) {
       clearTimeout(runtime.sectionTimer)
       runtime.sectionTimer = undefined
     }
     dispose(runtime.sectionDispose)
     runtime.sectionDispose = undefined
-    if (!runtime.policy.instruction) return
+    runtime.appliedInstruction = undefined
+    if (!text) {
+      runtime.appliedInstruction = ''
+      return
+    }
     try {
       runtime.sectionDispose = ctx.effect(() => ctx.systemPrompt.section({
         name: SECTION_NAME,
         order: SECTION_ORDER,
-        text: runtime.policy.instruction,
+        text,
         interpolate: false,
       }), `${PLUGIN_NAME}.section()`)
+      runtime.appliedInstruction = text
     } catch (error) {
       log('warn', `could not add the prompt section: ${message(error)}`)
       if (attempt < SECTION_RETRY_DELAYS.length) {
@@ -214,11 +237,13 @@ export function apply(ctx, config) {
       try {
         apply(names)
         applied = true
+        // This host knows every name in the list; a stale warning would lie.
+        runtime.unknownTools.clear()
       } catch {
         // `restrict()` refuses a filter naming an unknown tool, so a partial
         // tool surface must not cost us the names that do exist.
         for (const name of names) {
-          try { apply([name]); applied = true } catch { /* not mounted here */ }
+          try { apply([name]); applied = true } catch { runtime.unknownTools.add(name) }
         }
       }
       if (!applied) log('warn', 'could not hide the denied tools for this agent; the guard still blocks their calls')
@@ -232,13 +257,20 @@ export function apply(ctx, config) {
       try { dispose() } catch { /* already gone with its agent */ }
     }
     runtime.restrictions.clear()
+    runtime.appliedDeny = undefined
   }
 
   const syncRestrictions = () => {
-    if (deniedTools(runtime.policy).length === 0) {
+    const names = deniedTools(runtime.policy)
+    if (names.length === 0) {
       disposeRestrictions()
+      runtime.appliedDeny = ''
       return
     }
+    // Same deny list as last time and at least one live restriction: rebuilding
+    // it would only churn (and reopen the "already registered" window).
+    const key = names.join(',')
+    if (runtime.appliedDeny === key && runtime.restrictions.size > 0) return
     // Never tear the old restrictions down before the replacement list is
     // known: the agents service is briefly unavailable during a reload, and
     // the dispose-then-rebuild order left the model seeing tools the policy
@@ -250,6 +282,7 @@ export function apply(ctx, config) {
     }
     disposeRestrictions()
     for (const agent of agents) restrictAgent(agent)
+    runtime.appliedDeny = runtime.restrictions.size > 0 ? key : undefined
   }
 
   // Always registered; it consults the live policy per agent, so a level change
@@ -295,25 +328,42 @@ export function apply(ctx, config) {
   const update = (patch) => {
     // Only the panel's layer moves here. `authored` is never touched, so a value
     // written in `cordis.patch.yml` comes back the moment its pin is cleared.
-    const next = { ...runtime.pinned }
+    const previous = runtime.pinned
+    const next = { ...previous }
     if (LEVELS.includes(patch.level)) next.level = patch.level
     for (const field of ['reasoningEffort', 'search']) {
       if (patch[field] === 'auto') delete next[field]
       else if (patch[field] !== undefined) next[field] = patch[field]
     }
     if (SUBAGENT_CHOICES.includes(patch.subagents)) next.subagents = patch.subagents
+    // Advanced knobs (`0` = follow the level, `-1` = unlimited).
+    if (patch.maxTokens === 0 || patch.maxTokens === -1 || (Number.isInteger(patch.maxTokens) && patch.maxTokens > 0)) {
+      next.maxTokens = patch.maxTokens
+    }
+    if (patch.instruction === 'auto') delete next.instruction
+    else if (typeof patch.instruction === 'string') next.instruction = patch.instruction
+    if (typeof patch.applyToAllModels === 'boolean') next.applyToAllModels = patch.applyToAllModels
     runtime.pinned = next
     runtime.raw = { ...runtime.authored, ...next }
     runtime.policy = normalizeConfig(runtime.raw)
-    store.write({
-      // `next.level` is undefined when the panel never picked one. Writing that
-      // drops the key from the JSON, and `store.read()` refuses a file without
-      // it — the panel's choice then looked applied but was gone on restart.
-      level: next.level ?? runtime.policy.level,
-      reasoningEffort: next.reasoningEffort ?? 'auto',
-      search: next.search ?? 'auto',
-      subagents: runtime.policy.subagents,
-    })
+    // Only the fields this click actually moved are written, so the other host's
+    // edits to the rest of the document survive (they share one file).
+    const changed = PIN_FIELDS.filter((field) => next[field] !== previous[field])
+    if (changed.length > 0) {
+      store.write({
+        // `next.level` is undefined when the panel never picked one. Writing that
+        // drops the key from the JSON, and `store.read()` refuses a file without
+        // it — the panel's choice then looked applied but was gone on restart.
+        level: next.level ?? runtime.policy.level,
+        reasoningEffort: next.reasoningEffort ?? 'auto',
+        search: next.search ?? 'auto',
+        subagents: runtime.policy.subagents,
+        maxTokens: next.maxTokens,
+        instruction: next.instruction ?? 'auto',
+        applyToAllModels: next.applyToAllModels,
+        subagentTools: next.subagentTools,
+      }, changed)
+    }
     log('info', `updated: ${describePolicy(runtime.policy)}`)
     syncInstruction()
     syncRestrictions()
@@ -321,12 +371,13 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Choose a level. The level also resets the explicit effort and the explicit
-   * search choice, so a level click always means "this level's defaults"; pick
-   * those two afterwards to override just that knob. The subagent choice is
-   * independent and kept.
+   * Choose a level.
+   *
+   * Only the level moves. A level supplies defaults, and an explicit effort or
+   * search choice is a decision the user made — the click used to clear both,
+   * so switching 标准 → 轻 → 标准 silently threw away two settings.
    */
-  const setLevel = (level) => (LEVELS.includes(level) ? update({ level, reasoningEffort: 'auto', search: 'auto' }) : undefined)
+  const setLevel = (level) => (LEVELS.includes(level) ? update({ level }) : undefined)
 
   /** Choose the reasoning effort itself: auto | none | off | low | high | max. */
   const setReasoningEffort = (value) => (REASONING_CHOICES.includes(value) ? update({ reasoningEffort: value }) : undefined)
@@ -336,6 +387,19 @@ export function apply(ctx, config) {
 
   /** Allow or forbid spawning subagents: allow | deny. */
   const setSubagents = (value) => (SUBAGENT_CHOICES.includes(value) ? update({ subagents: value }) : undefined)
+
+  /** Answer cap: `0` follows the level, `-1` is unlimited, a positive integer caps. */
+  const setMaxTokens = (value) => (
+    value === 0 || value === -1 || (Number.isInteger(value) && value > 0) ? update({ maxTokens: value }) : undefined
+  )
+
+  /** The brevity instruction: `auto` follows the level, `none` disables it, text replaces it. */
+  const setInstruction = (value) => (
+    value === 'auto' || value === 'none' || typeof value === 'string' ? update({ instruction: value }) : undefined
+  )
+
+  /** Clamp every provider instead of DeepSeek routes only. */
+  const setApplyToAllModels = (value) => (typeof value === 'boolean' ? update({ applyToAllModels: value }) : undefined)
 
   /**
    * Adopt a choice another host wrote.
@@ -407,6 +471,9 @@ export function apply(ctx, config) {
     setReasoningEffort,
     setSearch,
     setSubagents,
+    setMaxTokens,
+    setInstruction,
+    setApplyToAllModels,
     log,
     debugLog,
     storedAt: () => store.read()?.updatedAt ?? null,
@@ -536,17 +603,24 @@ function liveAgents(ctx) {
   }
 }
 
-/** The four fields the panel owns; the rest of the config belongs to the patch. */
-const PIN_FIELDS = ['level', 'reasoningEffort', 'search', 'subagents']
+/** The fields the panel owns; the rest of the config belongs to the patch. */
+const PIN_FIELDS = ['level', 'reasoningEffort', 'search', 'subagents', 'maxTokens', 'instruction', 'applyToAllModels', 'subagentTools']
 
 /**
  * True when two pin objects say the same thing, field by field.
  *
  * Per-field rather than a JSON string: the key order of `level.json` is not
- * something to depend on, and a missing field must equal a missing field.
+ * something to depend on, and a missing field must equal a missing field. Lists
+ * are compared by content, or a fresh array from `read()` would look like a
+ * change on every watch event.
  */
 function samePin(a, b) {
-  return PIN_FIELDS.every((field) => a?.[field] === b?.[field])
+  return PIN_FIELDS.every((field) => {
+    const left = a?.[field]
+    const right = b?.[field]
+    if (Array.isArray(left) || Array.isArray(right)) return JSON.stringify(left) === JSON.stringify(right)
+    return left === right
+  })
 }
 
 function dispose(disposer) {

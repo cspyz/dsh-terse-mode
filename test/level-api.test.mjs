@@ -75,6 +75,39 @@ describe('the panel API', () => {
     assert.equal(body.persistedAt, '2026-10-01T00:00:00.000Z')
   })
 
+  it('reports which layer each value came from, and what is really mounted', async () => {
+    // A patch-level `search: deny` used to look exactly like a choice the user
+    // made, so clicking "follow the level" looked like a dead button.
+    const runtime = {
+      policy: {
+        level: 'standard',
+        authored: { level: 'standard', search: 'deny' },
+        reasoningEffort: 'low',
+        reasoningMode: 'cap',
+        maxTokens: null,
+        search: 'deny',
+        instruction: 'x',
+      },
+      pinned: { level: 'light' },
+      authored: { level: 'standard', search: 'deny' },
+      sectionDispose: () => {},
+      restrictions: new Set([() => {}, () => {}]),
+    }
+    const controller = {
+      runtime,
+      setLevel: () => runtime.policy,
+      storedAt: () => null,
+    }
+    const res = response()
+    await createLevelHandler(controller)(request('GET'), res)
+    const body = res.json()
+    assert.equal(body.sources.level, 'panel', 'a panel pick wins the level')
+    assert.equal(body.sources.search, 'patch', 'written in cordis.patch.yml')
+    assert.equal(body.sources.reasoningEffort, 'level', 'nobody chose it')
+    assert.equal(body.health.instruction, true, 'the section is mounted')
+    assert.equal(body.health.sessions, 2, 'two live restrictions')
+  })
+
   it('applies a POSTed level', async () => {
     const controller = stub()
     const res = response()
@@ -213,12 +246,46 @@ describe('the panel API', () => {
     assert.equal(res.headers.allow, 'GET, POST')
   })
 
-  it('reports a thrown handler as JSON instead of an empty 400', async () => {
-    const controller = { get runtime() { throw new Error('boom') }, setLevel: () => undefined }
+  it('reports a thrown handler as a fixed 500 and logs the detail (A-3)', async () => {
+    const logged = []
+    const controller = {
+      get runtime() { throw new Error('boom EPERM /home/user/.dsh/storages/level.json') },
+      setLevel: () => undefined,
+      log: (level, text) => logged.push([level, text]),
+    }
     const res = response()
     await createLevelHandler(controller)(request('GET'), res)
     assert.equal(res.status, 500)
-    assert.match(res.json().error, /boom/)
+    assert.equal(res.json().error, 'internal error', 'the caller gets a fixed string, not the path/errno')
+    assert.ok(logged.some(([level, text]) => level === 'warn' && /boom EPERM/.test(text)), 'the detail reaches the plugin log')
+  })
+
+  it('parses a body delivered as string chunks (req.setEncoding) (A-4)', async () => {
+    const controller = stub()
+    const req = Readable.from(['{"level":"strong"}']) // a string chunk, not a Buffer
+    req.method = 'POST'
+    req.headers = { 'content-type': 'application/json' }
+    const res = response()
+    await createLevelHandler(controller)(req, res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(controller.calls, [['level', 'strong']])
+  })
+
+  it('closes the connection on an oversized body instead of desyncing it (A-2)', async () => {
+    const controller = stub()
+    const req = Readable.from([Buffer.alloc(5000, 0x61)]) // > MAX_BODY_BYTES
+    req.method = 'POST'
+    req.headers = { 'content-type': 'application/json' }
+    let destroyed = false
+    req.destroy = () => { destroyed = true }
+    const res = response()
+    let connection
+    res.setHeader = (name, value) => { if (name.toLowerCase() === 'connection') connection = value }
+    await createLevelHandler(controller)(req, res)
+    assert.equal(res.status, 400)
+    assert.equal(connection, 'close', 'the keep-alive socket must not carry the unread tail into the next request')
+    assert.ok(destroyed, 'the request is destroyed')
+    assert.deepEqual(controller.calls, [], 'nothing applied')
   })
 })
 
@@ -453,9 +520,11 @@ describe('live changes through apply()', () => {
     assert.equal(opened.reasoningChoice, 'high')
 
     const afterLevel = await ctx.call('POST', { level: 'strong' }).then((r) => r.json())
-    assert.equal(afterLevel.reasoningChoice, 'auto', 'a level click clears the explicit effort')
-    assert.equal(afterLevel.effective.reasoningEffort, 'off')
-    assert.equal(afterLevel.effective.reasoningMode, 'cap')
+    // A level supplies defaults; it no longer throws away a choice the user made
+    // (switching 标准 → 轻 → 标准 used to lose both switches silently).
+    assert.equal(afterLevel.reasoningChoice, 'high', 'the explicit effort survives a level click')
+    assert.equal(afterLevel.effective.reasoningEffort, 'high')
+    assert.equal(afterLevel.effective.reasoningMode, 'exact')
   })
 
   it('turns web search on and off through the API, independently of the level', async () => {
@@ -479,11 +548,11 @@ describe('live changes through apply()', () => {
     assert.equal(auto.searchChoice, 'auto')
     assert.equal(auto.effective.search, 'deny', 'standard decides again')
 
-    // A level click also resets the explicit choice, in both directions.
+    // ... and a level click keeps it: an explicit switch is not a default.
     await harness.ctx.call('POST', { search: 'deny' })
     const light = await harness.ctx.call('POST', { level: 'light' }).then((r) => r.json())
-    assert.equal(light.searchChoice, 'auto')
-    assert.equal(light.effective.search, 'allow')
+    assert.equal(light.searchChoice, 'deny', 'the explicit search choice survives')
+    assert.equal(light.effective.search, 'deny', 'even when the new level would allow it')
 
     const bad = await harness.ctx.call('POST', { search: 'maybe' })
     assert.equal(bad.status, 400)
@@ -528,6 +597,25 @@ describe('live changes through apply()', () => {
     assert.equal(guard({ name: 'subagent' }), undefined)
   })
 
+  it('edits the advanced knobs through the same route', async () => {
+    apply(harness.ctx, { level: 'standard' })
+
+    const cap = await harness.ctx.call('POST', { maxTokens: 4096 })
+    assert.equal(cap.status, 200)
+    assert.equal(cap.json().maxTokensChoice, 4096)
+    assert.equal(cap.json().effective.maxTokens, 4096, 'the clamp follows the new cap')
+
+    const all = await harness.ctx.call('POST', { applyToAllModels: true })
+    assert.equal(all.json().applyToAllModelsChoice, true)
+
+    const instr = await harness.ctx.call('POST', { instruction: 'Be terse.' })
+    assert.equal(instr.json().instructionChoice, 'Be terse.')
+
+    // Rejected before anything is applied.
+    assert.equal((await harness.ctx.call('POST', { maxTokens: 1.5 })).status, 400)
+    assert.equal((await harness.ctx.call('POST', { applyToAllModels: 'yes' })).status, 400)
+  })
+
   it('keeps existing restrictions when the agents service is unavailable', async () => {
     harness.state.agents.push(harness.ctx.makeAgent('open'))
     apply(harness.ctx, { level: 'standard' })
@@ -536,7 +624,9 @@ describe('live changes through apply()', () => {
     // A reload window: the service throws, which used to be read as "no agents"
     // and disposed every restriction without rebuilding any.
     harness.services.agents = { list() { throw new Error('reloading') } }
-    const res = await harness.ctx.call('POST', { level: 'strong' })
+    // The deny list has to change for this path to run at all: an unchanged one
+    // is now skipped before the agents service is ever consulted.
+    const res = await harness.ctx.call('POST', { subagents: 'deny' })
     assert.equal(res.status, 200)
     assert.equal(harness.state.restrictions.length, 1, 'the old restriction survives')
     assert.equal(harness.state.restrictionsReleased, 0)

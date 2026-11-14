@@ -42,6 +42,17 @@ describe('normalizeConfig', () => {
     assert.equal(policy.warnings.length, 1)
   })
 
+  it('never throws on a value whose toString throws or has no prototype', () => {
+    // A-14: describe() used String(value), which throws on a null-proto object
+    // or a hostile toString — breaking the "never throws" activation contract.
+    const nullProto = normalizeConfig({ level: Object.create(null) })
+    assert.equal(nullProto.level, 'standard')
+    assert.ok(nullProto.warnings.length >= 1)
+    const hostile = normalizeConfig({ maxTokens: { toString() { throw new Error('boom') } } })
+    assert.equal(hostile.maxTokens, null)
+    assert.ok(hostile.warnings.length >= 1)
+  })
+
   it('keeps a valid level', () => {
     for (const level of LEVELS) assert.equal(normalizeConfig({ level }).level, level)
   })
@@ -72,6 +83,14 @@ describe('normalizeConfig', () => {
     assert.equal(normalizeConfig({ level: 'strong', maxTokens: 0 }).maxTokens, null, 'the strong level no longer caps output')
     assert.equal(normalizeConfig({ level: 'strong', maxTokens: -1 }).maxTokens, null)
     assert.equal(normalizeConfig({ level: 'standard', maxTokens: 999.9 }).maxTokens, 999, 'an explicit cap still works')
+  })
+
+  it('never floors a fractional cap to 0 (which would silently disable it)', () => {
+    // A-7: 0.5 used to floor to 0, read as "no cap", with no warning.
+    const half = normalizeConfig({ level: 'standard', maxTokens: 0.5 })
+    assert.equal(half.maxTokens, 1)
+    assert.equal(clampCallConfig({ provider: 'deepseek', model: 'm', maxTokens: 100_000 }, half).maxTokens, 1, 'the cap actually applies')
+    assert.equal(normalizeConfig({ level: 'standard', maxTokens: 0.9 }).maxTokens, 1)
   })
 
   it('appends the search clause only while web tools are blocked', () => {
@@ -274,6 +293,22 @@ describe('clampCallConfig', () => {
     assert.equal(clampCallConfig({ provider: 'deepseek', model: 'm', maxTokens: 100_000 }, capped).maxTokens, 4096)
     assert.equal(clampCallConfig({ provider: 'deepseek', model: 'm', maxTokens: 256 }, capped).maxTokens, 256, 'never grows')
     assert.equal(clampCallConfig({ provider: 'deepseek', model: 'm' }, capped).maxTokens, 4096)
+  })
+
+  it('never turns a non-numeric cap into a bigger one', () => {
+    const capped = normalizeConfig({ level: 'standard', maxTokens: 4096 })
+    // `"200"` used to be replaced by the policy cap, i.e. raised 200 → 4096.
+    assert.equal(clampCallConfig({ provider: 'deepseek', model: 'm', maxTokens: '200' }, capped).maxTokens, '200')
+    // A missing or "no limit" value still gets the configured cap.
+    assert.equal(clampCallConfig({ provider: 'deepseek', model: 'm', maxTokens: -1 }, capped).maxTokens, 4096)
+  })
+
+  it('cannot be tricked into skipping validation by a config key', () => {
+    // The internal "already normalised" marker used to be a string, so YAML could
+    // author it and hand `Config.validate` an object it never checked.
+    const forged = normalizeConfig({ __dshTerseModeNormalized: 1, level: 'off' })
+    assert.equal(typeof forged.instruction, 'string', 'the forged object is normalised, not returned as-is')
+    assert.ok(Array.isArray(forged.warnings))
   })
 
   it('does nothing at the off level', () => {

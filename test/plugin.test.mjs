@@ -7,7 +7,7 @@
  * make `apply` or an `agent/created` listener throw.
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'node:test'
@@ -517,6 +517,30 @@ describe('the panel layer and the shared state file', () => {
       }
       assert.doesNotMatch(ctx.state.sections[0].text, /Web search and web fetch are turned off/, `light allows search again ${JSON.stringify(ctx.state.logs)}`)
       assert.ok(ctx.state.logs.some(([, , text]) => /another host/.test(text)))
+      ctx.ctx.releaseAll()
+    })
+  })
+
+  it('persists clearing the instruction back to the level default', async () => {
+    // Clearing a custom instruction (or "none") to "auto" used to stay only in
+    // memory: the write skipped the undefined value, so the file kept the old
+    // text and the dir watch resurrected it ~150ms later.
+    await withHome(async (home) => {
+      const ctx = fakeContext()
+      apply(ctx.ctx, Config['~standard'].validate({ level: 'standard' }).value)
+      const route = ctx.state.routes[0]
+      const file = join(home, 'storages', 'dsh-terse-mode', 'level.json')
+      const disk = () => JSON.parse(readFileSync(file, 'utf8'))
+
+      await callRoute(route, 'POST', { instruction: 'CUSTOM-XYZ' })
+      assert.equal(disk().instruction, 'CUSTOM-XYZ')
+      await callRoute(route, 'POST', { instruction: 'auto' })
+      assert.equal(disk().instruction, 'auto', 'clearing a custom instruction must reach the file')
+
+      await callRoute(route, 'POST', { instruction: 'none' })
+      assert.equal(disk().instruction, 'none')
+      await callRoute(route, 'POST', { instruction: 'auto' })
+      assert.equal(disk().instruction, 'auto', 'clearing "none" must reach the file too')
       ctx.ctx.releaseAll()
     })
   })
