@@ -2,7 +2,7 @@ English | [中文](README.md)
 
 # dsh-terse-mode — think less, search less, talk less
 
-<img src="https://raw.githubusercontent.com/cspyz/dsh-terse-mode/main/assets/screenshots/01-popover.png" width="620" alt="The Terse mode panel: the four levels (off / light / standard / strong) on top, then reasoning effort, subagents and web search, each with a tag saying which layer decided its value">
+<img src="https://raw.githubusercontent.com/cspyz/dsh-terse-mode/main/assets/screenshots/03-levels-en.png" width="760" alt="Terse mode at a glance: what Off, Light, Standard and Strong change in reasoning effort, web search and output length">
 
 Answers that restate the question first, a simple task that still thinks for a minute, a question that pulls in a web search, a subagent spawned for something you could have asked in one line — that is the default level being eager.
 
