@@ -1,4 +1,4 @@
-[English](../README.md) | 中文
+[English](../README.en.md) | 中文
 
 # dsh-terse-mode — 少想、少搜、少废话
 

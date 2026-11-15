@@ -1,3 +1,5 @@
+[English](README.en.md) | 中文
+
 # dsh-terse-mode — 少想、少搜、少废话
 
 <img src="https://raw.githubusercontent.com/cspyz/dsh-terse-mode/main/assets/screenshots/01-popover.png" width="620" alt="简洁模式面板：顶部四档（关 / 轻 / 标准 / 强），下面是思考强度、子代理、联网搜索，右侧标记说明这一项由谁决定">
