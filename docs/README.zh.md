@@ -255,7 +255,7 @@ node tools/install-terse-mode.mjs --uninstall
 ## 开发
 
 ```sh
-npm test                            # 全部用例（95 项，只用 node:test，无依赖）
+npm test                            # 全部用例（只用 node:test，无依赖）
 node --test test/logic.test.mjs     # 档位与钳制规则
 node --test test/plugin.test.mjs    # apply() 的接线（用一个假 Cordis context）
 ```

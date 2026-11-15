@@ -264,7 +264,7 @@ node tools/install-terse-mode.mjs --uninstall
 ## 开发
 
 ```sh
-cd terse-mode
+# 在仓库根目录执行；从别处进来先 cd 到 clone 下来的目录
 npm test                             # 全部用例（node --test test/*.test.mjs）
 
 node --test test/logic.test.mjs      # 档位与钳制规则
